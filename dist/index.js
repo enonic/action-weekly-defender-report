@@ -7550,9 +7550,10 @@ function plural(ms, msAbs, n, name) {
  * Converts tokens for a single address into an address object
  *
  * @param {Array} tokens Tokens object
+ * @param {Number} depth Current recursion depth for nested group protection
  * @return {Object} Address object
  */
-function _handleAddress(tokens) {
+function _handleAddress(tokens, depth) {
     let isGroup = false;
     let state = 'text';
     let address;
@@ -7561,10 +7562,12 @@ function _handleAddress(tokens) {
         address: [],
         comment: [],
         group: [],
-        text: []
+        text: [],
+        textWasQuoted: [] // Track which text tokens came from inside quotes
     };
     let i;
     let len;
+    let insideQuotes = false; // Track if we're currently inside a quoted string
 
     // Filter out <addresses>, (comments) and regular text
     for (i = 0, len = tokens.length; i < len; i++) {
@@ -7574,16 +7577,25 @@ function _handleAddress(tokens) {
             switch (token.value) {
                 case '<':
                     state = 'address';
+                    insideQuotes = false;
                     break;
                 case '(':
                     state = 'comment';
+                    insideQuotes = false;
                     break;
                 case ':':
                     state = 'group';
                     isGroup = true;
+                    insideQuotes = false;
+                    break;
+                case '"':
+                    // Track quote state for text tokens
+                    insideQuotes = !insideQuotes;
+                    state = 'text';
                     break;
                 default:
                     state = 'text';
+                    insideQuotes = false;
                     break;
             }
         } else if (token.value) {
@@ -7597,8 +7609,14 @@ function _handleAddress(tokens) {
             if (prevToken && prevToken.noBreak && data[state].length) {
                 // join values
                 data[state][data[state].length - 1] += token.value;
+                if (state === 'text' && insideQuotes) {
+                    data.textWasQuoted[data.textWasQuoted.length - 1] = true;
+                }
             } else {
                 data[state].push(token.value);
+                if (state === 'text') {
+                    data.textWasQuoted.push(insideQuotes);
+                }
             }
         }
     }
@@ -7612,16 +7630,36 @@ function _handleAddress(tokens) {
     if (isGroup) {
         // http://tools.ietf.org/html/rfc2822#appendix-A.1.3
         data.text = data.text.join(' ');
+
+        // Parse group members, but flatten any nested groups (RFC 5322 doesn't allow nesting)
+        let groupMembers = [];
+        if (data.group.length) {
+            let parsedGroup = addressparser(data.group.join(','), { _depth: depth + 1 });
+            // Flatten: if any member is itself a group, extract its members into the sequence
+            parsedGroup.forEach(member => {
+                if (member.group) {
+                    // Nested group detected - flatten it by adding its members directly
+                    groupMembers = groupMembers.concat(member.group);
+                } else {
+                    groupMembers.push(member);
+                }
+            });
+        }
+
         addresses.push({
             name: data.text || (address && address.name),
-            group: data.group.length ? addressparser(data.group.join(',')) : []
+            group: groupMembers
         });
     } else {
         // If no address was found, try to detect one from regular text
         if (!data.address.length && data.text.length) {
             for (i = data.text.length - 1; i >= 0; i--) {
-                if (data.text[i].match(/^[^@\s]+@[^@\s]+$/)) {
+                // Security fix: Do not extract email addresses from quoted strings
+                // RFC 5321 allows @ inside quoted local-parts like "user@domain"@example.com
+                // Extracting emails from quoted text leads to misrouting vulnerabilities
+                if (!data.textWasQuoted[i] && data.text[i].match(/^[^@\s]+@[^@\s]+$/)) {
                     data.address = data.text.splice(i, 1);
+                    data.textWasQuoted.splice(i, 1);
                     break;
                 }
             }
@@ -7638,10 +7676,13 @@ function _handleAddress(tokens) {
             // still no address
             if (!data.address.length) {
                 for (i = data.text.length - 1; i >= 0; i--) {
-                    // fixed the regex to parse email address correctly when email address has more than one @
-                    data.text[i] = data.text[i].replace(/\s*\b[^@\s]+@[^\s]+\b\s*/, _regexHandler).trim();
-                    if (data.address.length) {
-                        break;
+                    // Security fix: Do not extract email addresses from quoted strings
+                    if (!data.textWasQuoted[i]) {
+                        // fixed the regex to parse email address correctly when email address has more than one @
+                        data.text[i] = data.text[i].replace(/\s*\b[^@\s]+@[^\s]+\b\s*/, _regexHandler).trim();
+                        if (data.address.length) {
+                            break;
+                        }
                     }
                 }
             }
@@ -7806,6 +7847,13 @@ class Tokenizer {
 }
 
 /**
+ * Maximum recursion depth for parsing nested groups.
+ * RFC 5322 doesn't allow nested groups, so this is a safeguard against
+ * malicious input that could cause stack overflow.
+ */
+const MAX_NESTED_GROUP_DEPTH = 50;
+
+/**
  * Parses structured e-mail addresses from an address field
  *
  * Example:
@@ -7817,10 +7865,18 @@ class Tokenizer {
  *     [{name: 'Name', address: 'address@domain'}]
  *
  * @param {String} str Address field
+ * @param {Object} options Optional options object
+ * @param {Number} options._depth Internal recursion depth counter (do not set manually)
  * @return {Array} An array of address objects
  */
 function addressparser(str, options) {
     options = options || {};
+    let depth = options._depth || 0;
+
+    // Prevent stack overflow from deeply nested groups (DoS protection)
+    if (depth > MAX_NESTED_GROUP_DEPTH) {
+        return [];
+    }
 
     let tokenizer = new Tokenizer(str);
     let tokens = tokenizer.tokenize();
@@ -7845,7 +7901,7 @@ function addressparser(str, options) {
     }
 
     addresses.forEach(address => {
-        address = _handleAddress(address);
+        address = _handleAddress(address, depth);
         if (address.length) {
             parsedAddresses = parsedAddresses.concat(address);
         }
@@ -7916,15 +7972,12 @@ function wrap(str, lineLength) {
     let pos = 0;
     let chunkLength = lineLength * 1024;
     while (pos < str.length) {
-        let wrappedLines = str
-            .substr(pos, chunkLength)
-            .replace(new RegExp('.{' + lineLength + '}', 'g'), '$&\r\n')
-            .trim();
+        let wrappedLines = str.substr(pos, chunkLength).replace(new RegExp('.{' + lineLength + '}', 'g'), '$&\r\n');
         result.push(wrappedLines);
         pos += chunkLength;
     }
 
-    return result.join('\r\n').trim();
+    return result.join('');
 }
 
 /**
@@ -7937,7 +7990,6 @@ function wrap(str, lineLength) {
 class Encoder extends Transform {
     constructor(options) {
         super();
-        // init Transform
         this.options = options || {};
 
         if (this.options.lineLength !== false) {
@@ -7979,17 +8031,20 @@ class Encoder extends Transform {
         if (this.options.lineLength) {
             b64 = wrap(b64, this.options.lineLength);
 
-            // remove last line as it is still most probably incomplete
             let lastLF = b64.lastIndexOf('\n');
             if (lastLF < 0) {
                 this._curLine = b64;
                 b64 = '';
-            } else if (lastLF === b64.length - 1) {
-                this._curLine = '';
             } else {
-                this._curLine = b64.substr(lastLF + 1);
-                b64 = b64.substr(0, lastLF + 1);
+                this._curLine = b64.substring(lastLF + 1);
+                b64 = b64.substring(0, lastLF + 1);
+
+                if (b64 && !b64.endsWith('\r\n')) {
+                    b64 += '\r\n';
+                }
             }
+        } else {
+            this._curLine = '';
         }
 
         if (b64) {
@@ -8006,16 +8061,14 @@ class Encoder extends Transform {
         }
 
         if (this._curLine) {
-            this._curLine = wrap(this._curLine, this.options.lineLength);
             this.outputBytes += this._curLine.length;
-            this.push(this._curLine, 'ascii');
+            this.push(Buffer.from(this._curLine, 'ascii'));
             this._curLine = '';
         }
         done();
     }
 }
 
-// expose to the world
 module.exports = {
     encode,
     wrap,
@@ -8043,7 +8096,7 @@ const path = __nccwpck_require__(6928);
 const crypto = __nccwpck_require__(6982);
 
 const DKIM_ALGO = 'sha256';
-const MAX_MESSAGE_SIZE = 128 * 1024; // buffer messages larger than this to disk
+const MAX_MESSAGE_SIZE = 2 * 1024 * 1024; // buffer messages larger than this to disk
 
 /*
 // Usage:
@@ -8073,7 +8126,9 @@ class DKIMSigner {
         this.chunks = [];
         this.chunklen = 0;
         this.readPos = 0;
-        this.cachePath = this.cacheDir ? path.join(this.cacheDir, 'message.' + Date.now() + '-' + crypto.randomBytes(14).toString('hex')) : false;
+        this.cachePath = this.cacheDir
+            ? path.join(this.cacheDir, 'message.' + Date.now() + '-' + crypto.randomBytes(14).toString('hex'))
+            : false;
         this.cache = false;
 
         this.headers = false;
@@ -8656,7 +8711,7 @@ module.exports = (headers, hashAlgo, bodyHash, options) => {
     signer.update(canonicalizedHeaderData.headers);
     try {
         signature = signer.sign(options.privateKey, 'base64');
-    } catch (E) {
+    } catch (_E) {
         return false;
     }
 
@@ -9161,7 +9216,13 @@ function nmfetch(url, options) {
         });
     }
 
-    if (parsed.protocol === 'https:' && parsed.hostname && parsed.hostname !== reqOptions.host && !net.isIP(parsed.hostname) && !reqOptions.servername) {
+    if (
+        parsed.protocol === 'https:' &&
+        parsed.hostname &&
+        parsed.hostname !== reqOptions.host &&
+        !net.isIP(parsed.hostname) &&
+        !reqOptions.servername
+    ) {
         reqOptions.servername = parsed.hostname;
     }
 
@@ -9487,20 +9548,35 @@ class MailComposer {
         let icalEvent, eventObject;
         let attachments = [].concat(this.mail.attachments || []).map((attachment, i) => {
             let data;
-            let isMessageNode = /^message\//i.test(attachment.contentType);
 
             if (/^data:/i.test(attachment.path || attachment.href)) {
                 attachment = this._processDataUrl(attachment);
             }
 
-            let contentType = attachment.contentType || mimeFuncs.detectMimeType(attachment.filename || attachment.path || attachment.href || 'bin');
+            let contentType =
+                attachment.contentType || mimeFuncs.detectMimeType(attachment.filename || attachment.path || attachment.href || 'bin');
+
             let isImage = /^image\//i.test(contentType);
-            let contentDisposition = attachment.contentDisposition || (isMessageNode || (isImage && attachment.cid) ? 'inline' : 'attachment');
+            let isMessageNode = /^message\//i.test(contentType);
+
+            let contentDisposition =
+                attachment.contentDisposition || (isMessageNode || (isImage && attachment.cid) ? 'inline' : 'attachment');
+
+            let contentTransferEncoding;
+            if ('contentTransferEncoding' in attachment) {
+                // also contains `false`, to set
+                contentTransferEncoding = attachment.contentTransferEncoding;
+            } else if (isMessageNode) {
+                // the content might include non-ASCII bytes but at this point we do not know it yet
+                contentTransferEncoding = '8bit';
+            } else {
+                contentTransferEncoding = 'base64'; // the default
+            }
 
             data = {
                 contentType,
                 contentDisposition,
-                contentTransferEncoding: 'contentTransferEncoding' in attachment ? attachment.contentTransferEncoding : 'base64'
+                contentTransferEncoding
             };
 
             if (attachment.filename) {
@@ -9601,7 +9677,10 @@ class MailComposer {
             eventObject;
 
         if (this.mail.text) {
-            if (typeof this.mail.text === 'object' && (this.mail.text.content || this.mail.text.path || this.mail.text.href || this.mail.text.raw)) {
+            if (
+                typeof this.mail.text === 'object' &&
+                (this.mail.text.content || this.mail.text.path || this.mail.text.href || this.mail.text.raw)
+            ) {
                 text = this.mail.text;
             } else {
                 text = {
@@ -9626,7 +9705,10 @@ class MailComposer {
         }
 
         if (this.mail.amp) {
-            if (typeof this.mail.amp === 'object' && (this.mail.amp.content || this.mail.amp.path || this.mail.amp.href || this.mail.amp.raw)) {
+            if (
+                typeof this.mail.amp === 'object' &&
+                (this.mail.amp.content || this.mail.amp.path || this.mail.amp.href || this.mail.amp.raw)
+            ) {
                 amp = this.mail.amp;
             } else {
                 amp = {
@@ -9661,14 +9743,18 @@ class MailComposer {
             }
 
             eventObject.filename = false;
-            eventObject.contentType = 'text/calendar; charset=utf-8; method=' + (eventObject.method || 'PUBLISH').toString().trim().toUpperCase();
+            eventObject.contentType =
+                'text/calendar; charset=utf-8; method=' + (eventObject.method || 'PUBLISH').toString().trim().toUpperCase();
             if (!eventObject.headers) {
                 eventObject.headers = {};
             }
         }
 
         if (this.mail.html) {
-            if (typeof this.mail.html === 'object' && (this.mail.html.content || this.mail.html.path || this.mail.html.href || this.mail.html.raw)) {
+            if (
+                typeof this.mail.html === 'object' &&
+                (this.mail.html.content || this.mail.html.path || this.mail.html.href || this.mail.html.raw)
+            ) {
                 html = this.mail.html;
             } else {
                 html = {
@@ -9693,7 +9779,9 @@ class MailComposer {
                 }
 
                 data = {
-                    contentType: alternative.contentType || mimeFuncs.detectMimeType(alternative.filename || alternative.path || alternative.href || 'txt'),
+                    contentType:
+                        alternative.contentType ||
+                        mimeFuncs.detectMimeType(alternative.filename || alternative.path || alternative.href || 'txt'),
                     contentTransferEncoding: alternative.contentTransferEncoding
                 };
 
@@ -9939,9 +10027,46 @@ class MailComposer {
      * @return {Object} Parsed element
      */
     _processDataUrl(element) {
+        const dataUrl = element.path || element.href;
+
+        // Early validation to prevent ReDoS
+        if (!dataUrl || typeof dataUrl !== 'string') {
+            return element;
+        }
+
+        if (!dataUrl.startsWith('data:')) {
+            return element;
+        }
+
+        if (dataUrl.length > 52428800) {
+            // 52428800 chars = 50MB limit for data URL string (~37.5MB decoded image)
+            // Extract content type before rejecting to preserve MIME type
+            let detectedType = 'application/octet-stream';
+            const commaPos = dataUrl.indexOf(',');
+
+            if (commaPos > 0 && commaPos < 200) {
+                // Parse header safely with size limit
+                const header = dataUrl.substring(5, commaPos); // skip 'data:'
+                const parts = header.split(';');
+                if (parts[0] && parts[0].includes('/')) {
+                    detectedType = parts[0].trim();
+                }
+            }
+
+            // Return empty content for excessively long data URLs
+            return Object.assign({}, element, {
+                path: false,
+                href: false,
+                content: Buffer.alloc(0),
+                contentType: element.contentType || detectedType
+            });
+        }
+
         let parsedDataUri;
-        if ((element.path || element.href).match(/^data:/)) {
-            parsedDataUri = parseDataURI(element.path || element.href);
+        try {
+            parsedDataUri = parseDataURI(dataUrl);
+        } catch (_err) {
+            return element;
         }
 
         if (!parsedDataUri) {
@@ -10060,6 +10185,11 @@ class Mail extends EventEmitter {
             // indicates if the sender has became idle
             this.transporter.on('idle', (...args) => {
                 this.emit('idle', ...args);
+            });
+
+            // indicates if the sender has became idle and all connections are terminated
+            this.transporter.on('clear', (...args) => {
+                this.emit('clear', ...args);
             });
         }
 
@@ -10210,7 +10340,14 @@ class Mail extends EventEmitter {
     }
 
     getVersionString() {
-        return util.format('%s (%s; +%s; %s/%s)', packageData.name, packageData.version, packageData.homepage, this.transporter.name, this.transporter.version);
+        return util.format(
+            '%s (%s; +%s; %s/%s)',
+            packageData.name,
+            packageData.version,
+            packageData.homepage,
+            this.transporter.name,
+            this.transporter.version
+        );
     }
 
     _processPlugins(step, mail, callback) {
@@ -10475,7 +10612,8 @@ class MailMessage {
         if (this.data.attachments && this.data.attachments.length) {
             this.data.attachments.forEach((attachment, i) => {
                 if (!attachment.filename) {
-                    attachment.filename = (attachment.path || attachment.href || '').split('/').pop().split('?').shift() || 'attachment-' + (i + 1);
+                    attachment.filename =
+                        (attachment.path || attachment.href || '').split('/').pop().split('?').shift() || 'attachment-' + (i + 1);
                     if (attachment.filename.indexOf('.') < 0) {
                         attachment.filename += '.' + mimeFuncs.detectExtension(attachment.contentType);
                     }
@@ -11003,7 +11141,7 @@ module.exports = {
 
             // first line includes the charset and language info and needs to be encoded
             // even if it does not contain any unicode characters
-            line = 'utf-8\x27\x27';
+            line = "utf-8''";
             let encoded = true;
             startPos = 0;
 
@@ -11348,7 +11486,7 @@ module.exports = {
         try {
             // might throw if we try to encode invalid sequences, eg. partial emoji
             str = encodeURIComponent(str);
-        } catch (E) {
+        } catch (_E) {
             // should never run
             return str.replace(/[^\x00-\x1F *'()<>@,;:\\"[\]?=\u007F-\uFFFF]+/g, '');
         }
@@ -12469,7 +12607,10 @@ const extensions = new Map([
     ['bdm', 'application/vnd.syncml.dm+wbxml'],
     ['bed', 'application/vnd.realvnc.bed'],
     ['bh2', 'application/vnd.fujitsu.oasysprs'],
-    ['bin', ['application/octet-stream', 'application/mac-binary', 'application/macbinary', 'application/x-macbinary', 'application/x-binary']],
+    [
+        'bin',
+        ['application/octet-stream', 'application/mac-binary', 'application/macbinary', 'application/x-macbinary', 'application/x-binary']
+    ],
     ['bm', 'image/bmp'],
     ['bmi', 'application/vnd.bmi'],
     ['bmp', ['image/bmp', 'image/x-windows-bmp']],
@@ -12514,7 +12655,10 @@ const extensions = new Map([
     ['cii', 'application/vnd.anser-web-certificate-issue-initiation'],
     ['cil', 'application/vnd.ms-artgalry'],
     ['cla', 'application/vnd.claymore'],
-    ['class', ['application/octet-stream', 'application/java', 'application/java-byte-code', 'application/java-vm', 'application/x-java-class']],
+    [
+        'class',
+        ['application/octet-stream', 'application/java', 'application/java-byte-code', 'application/java-vm', 'application/x-java-class']
+    ],
     ['clkk', 'application/vnd.crick.clicker.keyboard'],
     ['clkp', 'application/vnd.crick.clicker.palette'],
     ['clkt', 'application/vnd.crick.clicker.template'],
@@ -13119,7 +13263,10 @@ const extensions = new Map([
     ['sbml', 'application/sbml+xml'],
     ['sc', 'application/vnd.ibm.secure-container'],
     ['scd', 'application/x-msschedule'],
-    ['scm', ['application/vnd.lotus-screencam', 'video/x-scm', 'text/x-script.guile', 'application/x-lotusscreencam', 'text/x-script.scheme']],
+    [
+        'scm',
+        ['application/vnd.lotus-screencam', 'video/x-scm', 'text/x-script.guile', 'application/x-lotusscreencam', 'text/x-script.scheme']
+    ],
     ['scq', 'application/scvp-cv-request'],
     ['scs', 'application/scvp-cv-response'],
     ['sct', 'text/scriptlet'],
@@ -14031,7 +14178,11 @@ class MimeNode {
 
                     this._handleContentType(structured);
 
-                    if (structured.value.match(/^text\/plain\b/) && typeof this.content === 'string' && /[\u0080-\uFFFF]/.test(this.content)) {
+                    if (
+                        structured.value.match(/^text\/plain\b/) &&
+                        typeof this.content === 'string' &&
+                        /[\u0080-\uFFFF]/.test(this.content)
+                    ) {
                         structured.params.charset = 'utf-8';
                     }
 
@@ -14442,8 +14593,8 @@ class MimeNode {
             setImmediate(() => {
                 try {
                     contentStream.end(content._resolvedValue);
-                } catch (err) {
-                    contentStream.emit('error', err);
+                } catch (_err) {
+                    contentStream.emit('error', _err);
                 }
             });
 
@@ -14474,8 +14625,8 @@ class MimeNode {
             setImmediate(() => {
                 try {
                     contentStream.end(content || '');
-                } catch (err) {
-                    contentStream.emit('error', err);
+                } catch (_err) {
+                    contentStream.emit('error', _err);
                 }
             });
             return contentStream;
@@ -14493,7 +14644,6 @@ class MimeNode {
         return [].concat.apply(
             [],
             [].concat(addresses).map(address => {
-                // eslint-disable-line prefer-spread
                 if (address && address.address) {
                     address.address = this._normalizeAddress(address.address);
                     address.name = address.name || '';
@@ -14592,7 +14742,6 @@ class MimeNode {
                     .apply(
                         [],
                         [].concat(value || '').map(elm => {
-                            // eslint-disable-line prefer-spread
                             elm = (elm || '')
                                 .toString()
                                 .replace(/\r?\n|\r/g, ' ')
@@ -14698,7 +14847,7 @@ class MimeNode {
 
         try {
             encodedDomain = punycode.toASCII(domain.toLowerCase());
-        } catch (err) {
+        } catch (_err) {
             // keep as is?
         }
 
@@ -14761,7 +14910,7 @@ class MimeNode {
             // count latin alphabet symbols and 8-bit range symbols + control symbols
             // if there are more latin characters, then use quoted-printable
             // encoding, otherwise use base64
-            nonLatinLen = (value.match(/[\x00-\x08\x0B\x0C\x0E-\x1F\u0080-\uFFFF]/g) || []).length; // eslint-disable-line no-control-regex
+            nonLatinLen = (value.match(/[\x00-\x08\x0B\x0C\x0E-\x1F\u0080-\uFFFF]/g) || []).length;
             latinLen = (value.match(/[a-z]/gi) || []).length;
             // if there are more latin symbols than binary/unicode, then prefer Q, otherwise B
             encoding = nonLatinLen < latinLen ? 'Q' : 'B';
@@ -14998,6 +15147,13 @@ module.exports.createTransport = function (transporter, defaults) {
         } else if (options.jsonTransport) {
             transporter = new JSONTransport(options);
         } else if (options.SES) {
+            if (options.SES.ses && options.SES.aws) {
+                let error = new Error(
+                    'Using legacy SES configuration, expecting @aws-sdk/client-sesv2, see https://nodemailer.com/transports/ses/'
+                );
+                error.code = 'LegacyConfig';
+                throw error;
+            }
             transporter = new SESTransport(options);
         } else {
             transporter = new SMTPTransport(options);
@@ -15607,7 +15763,10 @@ function encode(buffer) {
     for (let i = 0, len = buffer.length; i < len; i++) {
         ord = buffer[i];
         // if the char is in allowed range, then keep as is, unless it is a WS in the end of a line
-        if (checkRanges(ord, ranges) && !((ord === 0x20 || ord === 0x09) && (i === len - 1 || buffer[i + 1] === 0x0a || buffer[i + 1] === 0x0d))) {
+        if (
+            checkRanges(ord, ranges) &&
+            !((ord === 0x20 || ord === 0x09) && (i === len - 1 || buffer[i + 1] === 0x0a || buffer[i + 1] === 0x0d))
+        ) {
             result += String.fromCharCode(ord);
             continue;
         }
@@ -15669,7 +15828,12 @@ function wrap(str, lineLength) {
             }
 
             // ensure that utf-8 sequences are not split
-            while (line.length > 3 && line.length < len - pos && !line.match(/^(?:=[\da-f]{2}){1,4}$/i) && (match = line.match(/[=][\da-f]{2}$/gi))) {
+            while (
+                line.length > 3 &&
+                line.length < len - pos &&
+                !line.match(/^(?:=[\da-f]{2}){1,4}$/i) &&
+                (match = line.match(/[=][\da-f]{2}$/gi))
+            ) {
                 code = parseInt(match[0].substr(1, 2), 16);
                 if (code < 128) {
                     break;
@@ -16028,14 +16192,10 @@ const EventEmitter = __nccwpck_require__(4434);
 const packageData = __nccwpck_require__(6710);
 const shared = __nccwpck_require__(1284);
 const LeWindows = __nccwpck_require__(7793);
+const MimeNode = __nccwpck_require__(6628);
 
 /**
  * Generates a Transport object for AWS SES
- *
- * Possible options can be the following:
- *
- *  * **sendingRate** optional Number specifying how many messages per second should be delivered to SES
- *  * **maxConnections** optional Number specifying max number of parallel connections to SES
  *
  * @constructor
  * @param {Object} optional config parameter
@@ -16054,119 +16214,17 @@ class SESTransport extends EventEmitter {
         this.logger = shared.getLogger(this.options, {
             component: this.options.component || 'ses-transport'
         });
-
-        // parallel sending connections
-        this.maxConnections = Number(this.options.maxConnections) || Infinity;
-        this.connections = 0;
-
-        // max messages per second
-        this.sendingRate = Number(this.options.sendingRate) || Infinity;
-        this.sendingRateTTL = null;
-        this.rateInterval = 1000; // milliseconds
-        this.rateMessages = [];
-
-        this.pending = [];
-
-        this.idling = true;
-
-        setImmediate(() => {
-            if (this.idling) {
-                this.emit('idle');
-            }
-        });
     }
 
-    /**
-     * Schedules a sending of a message
-     *
-     * @param {Object} emailMessage MailComposer object
-     * @param {Function} callback Callback function to run when the sending is completed
-     */
-    send(mail, callback) {
-        if (this.connections >= this.maxConnections) {
-            this.idling = false;
-            return this.pending.push({
-                mail,
-                callback
-            });
+    getRegion(cb) {
+        if (this.ses.sesClient.config && typeof this.ses.sesClient.config.region === 'function') {
+            // promise
+            return this.ses.sesClient.config
+                .region()
+                .then(region => cb(null, region))
+                .catch(err => cb(err));
         }
-
-        if (!this._checkSendingRate()) {
-            this.idling = false;
-            return this.pending.push({
-                mail,
-                callback
-            });
-        }
-
-        this._send(mail, (...args) => {
-            setImmediate(() => callback(...args));
-            this._sent();
-        });
-    }
-
-    _checkRatedQueue() {
-        if (this.connections >= this.maxConnections || !this._checkSendingRate()) {
-            return;
-        }
-
-        if (!this.pending.length) {
-            if (!this.idling) {
-                this.idling = true;
-                this.emit('idle');
-            }
-            return;
-        }
-
-        let next = this.pending.shift();
-        this._send(next.mail, (...args) => {
-            setImmediate(() => next.callback(...args));
-            this._sent();
-        });
-    }
-
-    _checkSendingRate() {
-        clearTimeout(this.sendingRateTTL);
-
-        let now = Date.now();
-        let oldest = false;
-        // delete older messages
-        for (let i = this.rateMessages.length - 1; i >= 0; i--) {
-            if (this.rateMessages[i].ts >= now - this.rateInterval && (!oldest || this.rateMessages[i].ts < oldest)) {
-                oldest = this.rateMessages[i].ts;
-            }
-
-            if (this.rateMessages[i].ts < now - this.rateInterval && !this.rateMessages[i].pending) {
-                this.rateMessages.splice(i, 1);
-            }
-        }
-
-        if (this.rateMessages.length < this.sendingRate) {
-            return true;
-        }
-
-        let delay = Math.max(oldest + 1001, now + 20);
-        this.sendingRateTTL = setTimeout(() => this._checkRatedQueue(), now - delay);
-
-        try {
-            this.sendingRateTTL.unref();
-        } catch (E) {
-            // Ignore. Happens on envs with non-node timer implementation
-        }
-
-        return false;
-    }
-
-    _sent() {
-        this.connections--;
-        this._checkRatedQueue();
-    }
-
-    /**
-     * Returns true if there are free slots in the queue
-     */
-    isIdle() {
-        return this.idling;
+        return cb(null, false);
     }
 
     /**
@@ -16175,13 +16233,17 @@ class SESTransport extends EventEmitter {
      * @param {Object} emailMessage MailComposer object
      * @param {Function} callback Callback function to run when the sending is completed
      */
-    _send(mail, callback) {
+    send(mail, callback) {
         let statObject = {
             ts: Date.now(),
             pending: true
         };
-        this.connections++;
-        this.rateMessages.push(statObject);
+
+        let fromHeader = mail.message._headers.find(header => /^from$/i.test(header.key));
+        if (fromHeader) {
+            let mimeNode = new MimeNode('text/plain');
+            fromHeader = mimeNode._convertAddresses(mimeNode._parseAddresses(fromHeader.value));
+        }
 
         let envelope = mail.data.envelope || mail.message.getEnvelope();
         let messageId = mail.message.messageId();
@@ -16251,45 +16313,29 @@ class SESTransport extends EventEmitter {
                 }
 
                 let sesMessage = {
-                    RawMessage: {
-                        // required
-                        Data: raw // required
+                    Content: {
+                        Raw: {
+                            // required
+                            Data: raw // required
+                        }
                     },
-                    Source: envelope.from,
-                    Destinations: envelope.to
+                    FromEmailAddress: fromHeader ? fromHeader : envelope.from,
+                    Destination: {
+                        ToAddresses: envelope.to
+                    }
                 };
 
                 Object.keys(mail.data.ses || {}).forEach(key => {
                     sesMessage[key] = mail.data.ses[key];
                 });
 
-                let ses = (this.ses.aws ? this.ses.ses : this.ses) || {};
-                let aws = this.ses.aws || {};
-
-                let getRegion = cb => {
-                    if (ses.config && typeof ses.config.region === 'function') {
-                        // promise
-                        return ses.config
-                            .region()
-                            .then(region => cb(null, region))
-                            .catch(err => cb(err));
-                    }
-                    return cb(null, (ses.config && ses.config.region) || 'us-east-1');
-                };
-
-                getRegion((err, region) => {
+                this.getRegion((err, region) => {
                     if (err || !region) {
                         region = 'us-east-1';
                     }
 
-                    let sendPromise;
-                    if (typeof ses.send === 'function' && aws.SendRawEmailCommand) {
-                        // v3 API
-                        sendPromise = ses.send(new aws.SendRawEmailCommand(sesMessage));
-                    } else {
-                        // v2 API
-                        sendPromise = ses.sendRawEmail(sesMessage).promise();
-                    }
+                    const command = new this.ses.SendEmailCommand(sesMessage);
+                    const sendPromise = this.ses.sesClient.send(command);
 
                     sendPromise
                         .then(data => {
@@ -16297,7 +16343,7 @@ class SESTransport extends EventEmitter {
                                 region = 'email';
                             }
 
-                            statObject.pending = false;
+                            statObject.pending = true;
                             callback(null, {
                                 envelope: {
                                     from: envelope.from,
@@ -16333,38 +16379,41 @@ class SESTransport extends EventEmitter {
      */
     verify(callback) {
         let promise;
-        let ses = (this.ses.aws ? this.ses.ses : this.ses) || {};
-        let aws = this.ses.aws || {};
-
-        const sesMessage = {
-            RawMessage: {
-                // required
-                Data: 'From: invalid@invalid\r\nTo: invalid@invalid\r\n Subject: Invalid\r\n\r\nInvalid'
-            },
-            Source: 'invalid@invalid',
-            Destinations: ['invalid@invalid']
-        };
-
         if (!callback) {
             promise = new Promise((resolve, reject) => {
                 callback = shared.callbackPromise(resolve, reject);
             });
         }
+
         const cb = err => {
-            if (err && (err.code || err.Code) !== 'InvalidParameterValue') {
+            if (err && !['InvalidParameterValue', 'MessageRejected'].includes(err.code || err.Code || err.name)) {
                 return callback(err);
             }
             return callback(null, true);
         };
 
-        if (typeof ses.send === 'function' && aws.SendRawEmailCommand) {
-            // v3 API
-            sesMessage.RawMessage.Data = Buffer.from(sesMessage.RawMessage.Data);
-            ses.send(new aws.SendRawEmailCommand(sesMessage), cb);
-        } else {
-            // v2 API
-            ses.sendRawEmail(sesMessage, cb);
-        }
+        const sesMessage = {
+            Content: {
+                Raw: {
+                    Data: Buffer.from('From: <invalid@invalid>\r\nTo: <invalid@invalid>\r\n Subject: Invalid\r\n\r\nInvalid')
+                }
+            },
+            FromEmailAddress: 'invalid@invalid',
+            Destination: {
+                ToAddresses: ['invalid@invalid']
+            }
+        };
+
+        this.getRegion((err, region) => {
+            if (err || !region) {
+                region = 'us-east-1';
+            }
+
+            const command = new this.ses.SendEmailCommand(sesMessage);
+            const sendPromise = this.ses.sesClient.send(command);
+
+            sendPromise.then(data => cb(null, data)).catch(err => cb(err));
+        });
 
         return promise;
     }
@@ -16392,11 +16441,19 @@ const net = __nccwpck_require__(9278);
 const os = __nccwpck_require__(857);
 
 const DNS_TTL = 5 * 60 * 1000;
+const CACHE_CLEANUP_INTERVAL = 30 * 1000; // Minimum 30 seconds between cleanups
+const MAX_CACHE_SIZE = 1000; // Maximum number of entries in cache
+
+let lastCacheCleanup = 0;
+module.exports._lastCacheCleanup = () => lastCacheCleanup;
+module.exports._resetCacheCleanup = () => {
+    lastCacheCleanup = 0;
+};
 
 let networkInterfaces;
 try {
     networkInterfaces = os.networkInterfaces();
-} catch (err) {
+} catch (_err) {
     // fails on some systems
 }
 
@@ -16462,8 +16519,8 @@ const formatDNSValue = (value, extra) => {
                 !value.addresses || !value.addresses.length
                     ? null
                     : value.addresses.length === 1
-                    ? value.addresses[0]
-                    : value.addresses[Math.floor(Math.random() * value.addresses.length)]
+                      ? value.addresses[0]
+                      : value.addresses[Math.floor(Math.random() * value.addresses.length)]
         },
         extra || {}
     );
@@ -16494,7 +16551,27 @@ module.exports.resolveHostname = (options, callback) => {
     if (dnsCache.has(options.host)) {
         cached = dnsCache.get(options.host);
 
-        if (!cached.expires || cached.expires >= Date.now()) {
+        // Lazy cleanup with time throttling
+        const now = Date.now();
+        if (now - lastCacheCleanup > CACHE_CLEANUP_INTERVAL) {
+            lastCacheCleanup = now;
+
+            // Clean up expired entries
+            for (const [host, entry] of dnsCache.entries()) {
+                if (entry.expires && entry.expires < now) {
+                    dnsCache.delete(host);
+                }
+            }
+
+            // If cache is still too large, remove oldest entries
+            if (dnsCache.size > MAX_CACHE_SIZE) {
+                const toDelete = Math.floor(MAX_CACHE_SIZE * 0.1); // Remove 10% of entries
+                const keys = Array.from(dnsCache.keys()).slice(0, toDelete);
+                keys.forEach(key => dnsCache.delete(key));
+            }
+        }
+
+        if (!cached.expires || cached.expires >= now) {
             return callback(
                 null,
                 formatDNSValue(cached.value, {
@@ -16507,7 +16584,11 @@ module.exports.resolveHostname = (options, callback) => {
     resolver(4, options.host, options, (err, addresses) => {
         if (err) {
             if (cached) {
-                // ignore error, use expired value
+                dnsCache.set(options.host, {
+                    value: cached.value,
+                    expires: Date.now() + (options.dnsTtl || DNS_TTL)
+                });
+
                 return callback(
                     null,
                     formatDNSValue(cached.value, {
@@ -16541,7 +16622,11 @@ module.exports.resolveHostname = (options, callback) => {
         resolver(6, options.host, options, (err, addresses) => {
             if (err) {
                 if (cached) {
-                    // ignore error, use expired value
+                    dnsCache.set(options.host, {
+                        value: cached.value,
+                        expires: Date.now() + (options.dnsTtl || DNS_TTL)
+                    });
+
                     return callback(
                         null,
                         formatDNSValue(cached.value, {
@@ -16576,7 +16661,11 @@ module.exports.resolveHostname = (options, callback) => {
                 dns.lookup(options.host, { all: true }, (err, addresses) => {
                     if (err) {
                         if (cached) {
-                            // ignore error, use expired value
+                            dnsCache.set(options.host, {
+                                value: cached.value,
+                                expires: Date.now() + (options.dnsTtl || DNS_TTL)
+                            });
+
                             return callback(
                                 null,
                                 formatDNSValue(cached.value, {
@@ -16627,9 +16716,13 @@ module.exports.resolveHostname = (options, callback) => {
                         })
                     );
                 });
-            } catch (err) {
+            } catch (_err) {
                 if (cached) {
-                    // ignore error, use expired value
+                    dnsCache.set(options.host, {
+                        value: cached.value,
+                        expires: Date.now() + (options.dnsTtl || DNS_TTL)
+                    });
+
                     return callback(
                         null,
                         formatDNSValue(cached.value, {
@@ -16800,52 +16893,74 @@ module.exports.callbackPromise = (resolve, reject) =>
     };
 
 module.exports.parseDataURI = uri => {
-    let input = uri;
-    let commaPos = input.indexOf(',');
-    if (!commaPos) {
-        return uri;
+    if (typeof uri !== 'string') {
+        return null;
     }
 
-    let data = input.substring(commaPos + 1);
-    let metaStr = input.substring('data:'.length, commaPos);
+    // Early return for non-data URIs to avoid unnecessary processing
+    if (!uri.startsWith('data:')) {
+        return null;
+    }
+
+    // Find the first comma safely - this prevents ReDoS
+    const commaPos = uri.indexOf(',');
+    if (commaPos === -1) {
+        return null;
+    }
+
+    const data = uri.substring(commaPos + 1);
+    const metaStr = uri.substring('data:'.length, commaPos);
 
     let encoding;
+    const metaEntries = metaStr.split(';');
 
-    let metaEntries = metaStr.split(';');
-    let lastMetaEntry = metaEntries.length > 1 ? metaEntries[metaEntries.length - 1] : false;
-    if (lastMetaEntry && lastMetaEntry.indexOf('=') < 0) {
-        encoding = lastMetaEntry.toLowerCase();
-        metaEntries.pop();
-    }
-
-    let contentType = metaEntries.shift() || 'application/octet-stream';
-    let params = {};
-    for (let entry of metaEntries) {
-        let sep = entry.indexOf('=');
-        if (sep >= 0) {
-            let key = entry.substring(0, sep);
-            let value = entry.substring(sep + 1);
-            params[key] = value;
+    if (metaEntries.length > 0) {
+        const lastEntry = metaEntries[metaEntries.length - 1].toLowerCase().trim();
+        // Only recognize valid encoding types to prevent manipulation
+        if (['base64', 'utf8', 'utf-8'].includes(lastEntry) && lastEntry.indexOf('=') === -1) {
+            encoding = lastEntry;
+            metaEntries.pop();
         }
     }
 
-    switch (encoding) {
-        case 'base64':
-            data = Buffer.from(data, 'base64');
-            break;
-        case 'utf8':
-            data = Buffer.from(data);
-            break;
-        default:
-            try {
-                data = Buffer.from(decodeURIComponent(data));
-            } catch (err) {
-                data = Buffer.from(data);
+    const contentType = metaEntries.length > 0 ? metaEntries.shift() : 'application/octet-stream';
+    const params = {};
+
+    for (let i = 0; i < metaEntries.length; i++) {
+        const entry = metaEntries[i];
+        const sepPos = entry.indexOf('=');
+        if (sepPos > 0) {
+            // Ensure there's a key before the '='
+            const key = entry.substring(0, sepPos).trim();
+            const value = entry.substring(sepPos + 1).trim();
+            if (key) {
+                params[key] = value;
             }
-            data = Buffer.from(data);
+        }
     }
 
-    return { data, encoding, contentType, params };
+    // Decode data based on encoding with proper error handling
+    let bufferData;
+    try {
+        if (encoding === 'base64') {
+            bufferData = Buffer.from(data, 'base64');
+        } else {
+            try {
+                bufferData = Buffer.from(decodeURIComponent(data));
+            } catch (_decodeError) {
+                bufferData = Buffer.from(data);
+            }
+        }
+    } catch (_bufferError) {
+        bufferData = Buffer.alloc(0);
+    }
+
+    return {
+        data: bufferData,
+        encoding: encoding || null,
+        contentType: contentType || 'application/octet-stream',
+        params
+    };
 };
 
 /**
@@ -17244,7 +17359,7 @@ function httpProxyClient(proxyUrl, destinationPort, destinationHost, callback) {
         finished = true;
         try {
             socket.destroy();
-        } catch (E) {
+        } catch (_E) {
             // ignore
         }
         callback(err);
@@ -17311,7 +17426,7 @@ function httpProxyClient(proxyUrl, destinationPort, destinationHost, callback) {
                 if (!match || (match[1] || '').charAt(0) !== '2') {
                     try {
                         socket.destroy();
-                    } catch (E) {
+                    } catch (_E) {
                         // ignore
                     }
                     return callback(new Error('Invalid response from proxy' + ((match && ': ' + match[1]) || '')));
@@ -17468,7 +17583,7 @@ class SMTPConnection extends EventEmitter {
 
         /**
          * The socket connecting to the server
-         * @publick
+         * @public
          */
         this._socket = false;
 
@@ -17759,7 +17874,7 @@ class SMTPConnection extends EventEmitter {
         if (socket && !socket.destroyed) {
             try {
                 socket[closeMethod]();
-            } catch (E) {
+            } catch (_E) {
                 // just ignore
             }
         }
@@ -18138,7 +18253,12 @@ class SMTPConnection extends EventEmitter {
 
         err = this._formatError(err, type, data, command);
 
-        this.logger.error(data, err.message);
+        const transientCodes = ['ETIMEDOUT', 'ESOCKET', 'ECONNECTION'];
+        if (transientCodes.includes(err.code)) {
+            this.logger.warn(data, err.message);
+        } else {
+            this.logger.error(data, err.message);
+        }
 
         this.emit('error', err);
         this.close();
@@ -18460,6 +18580,23 @@ class SMTPConnection extends EventEmitter {
             }
         }
 
+        // RFC 8689: If the envelope requests REQUIRETLS extension
+        // then append REQUIRETLS keyword to the MAIL FROM command
+        // Note: REQUIRETLS can only be used over TLS connections and requires server support
+        if (this._envelope.requireTLSExtensionEnabled) {
+            if (!this.secure) {
+                return callback(
+                    this._formatError('REQUIRETLS can only be used over TLS connections (RFC 8689)', 'EREQUIRETLS', false, 'MAIL FROM')
+                );
+            }
+            if (!this._supportedExtensions.includes('REQUIRETLS')) {
+                return callback(
+                    this._formatError('Server does not support REQUIRETLS extension (RFC 8689)', 'EREQUIRETLS', false, 'MAIL FROM')
+                );
+            }
+            args.push('REQUIRETLS');
+        }
+
         this._sendCommand('MAIL FROM:<' + this._envelope.from + '>' + (args.length ? ' ' + args.join(' ') : ''));
     }
 
@@ -18491,8 +18628,8 @@ class SMTPConnection extends EventEmitter {
             }
             notify = notify.map(n => n.trim().toUpperCase());
             let validNotify = ['NEVER', 'SUCCESS', 'FAILURE', 'DELAY'];
-            let invaliNotify = notify.filter(n => !validNotify.includes(n));
-            if (invaliNotify.length || (notify.length > 1 && notify.includes('NEVER'))) {
+            let invalidNotify = notify.filter(n => !validNotify.includes(n));
+            if (invalidNotify.length || (notify.length > 1 && notify.includes('NEVER'))) {
                 throw new Error('notify: ' + JSON.stringify(notify.join(',')));
             }
             notify = notify.join(',');
@@ -18638,7 +18775,12 @@ class SMTPConnection extends EventEmitter {
 
         if (str.charAt(0) !== '2') {
             if (this.options.requireTLS) {
-                this._onError(new Error('EHLO failed but HELO does not support required STARTTLS. response=' + str), 'ECONNECTION', str, 'EHLO');
+                this._onError(
+                    new Error('EHLO failed but HELO does not support required STARTTLS. response=' + str),
+                    'ECONNECTION',
+                    str,
+                    'EHLO'
+                );
                 return;
             }
 
@@ -18674,6 +18816,11 @@ class SMTPConnection extends EventEmitter {
         // Detect if the server supports 8BITMIME
         if (/[ -]8BITMIME\b/im.test(str)) {
             this._supportedExtensions.push('8BITMIME');
+        }
+
+        // Detect if the server supports REQUIRETLS (RFC 8689)
+        if (/[ -]REQUIRETLS\b/im.test(str)) {
+            this._supportedExtensions.push('REQUIRETLS');
         }
 
         // Detect if the server supports PIPELINING
@@ -18820,7 +18967,9 @@ class SMTPConnection extends EventEmitter {
         let challengeString = '';
 
         if (!challengeMatch) {
-            return callback(this._formatError('Invalid login sequence while waiting for server challenge string', 'EAUTH', str, 'AUTH CRAM-MD5'));
+            return callback(
+                this._formatError('Invalid login sequence while waiting for server challenge string', 'EAUTH', str, 'AUTH CRAM-MD5')
+            );
         } else {
             challengeString = challengeMatch[1];
         }
@@ -18963,7 +19112,7 @@ class SMTPConnection extends EventEmitter {
         }
 
         if (!this._envelope.rcptQueue.length) {
-            return callback(this._formatError('Can\x27t send mail - no recipients defined', 'EENVELOPE', false, 'API'));
+            return callback(this._formatError("Can't send mail - no recipients defined", 'EENVELOPE', false, 'API'));
         } else {
             this._recipientQueue = [];
 
@@ -19019,7 +19168,7 @@ class SMTPConnection extends EventEmitter {
                 });
                 this._sendCommand('DATA');
             } else {
-                err = this._formatError('Can\x27t send mail - all recipients were rejected', 'EENVELOPE', str, 'RCPT TO');
+                err = this._formatError("Can't send mail - all recipients were rejected", 'EENVELOPE', str, 'RCPT TO');
                 err.rejected = this._envelope.rejected;
                 err.rejectedErrors = this._envelope.rejectedErrors;
                 return callback(err);
@@ -19158,7 +19307,7 @@ class SMTPConnection extends EventEmitter {
         let defaultHostname;
         try {
             defaultHostname = os.hostname() || '';
-        } catch (err) {
+        } catch (_err) {
             // fails on windows 7
             defaultHostname = 'localhost';
         }
@@ -19519,7 +19668,7 @@ class SMTPPool extends EventEmitter {
         // resource is terminated with an error
         connection.once('error', err => {
             if (err.code !== 'EMAXLIMIT') {
-                this.logger.error(
+                this.logger.warn(
                     {
                         err,
                         tnx: 'pool',
@@ -19594,6 +19743,10 @@ class SMTPPool extends EventEmitter {
                     this._continueProcessing();
                 }, 50);
             } else {
+                if (!this._closed && this.idling && !this._connections.length) {
+                    this.emit('clear');
+                }
+
                 this._continueProcessing();
             }
         });
@@ -19867,7 +20020,8 @@ class PoolResource extends EventEmitter {
             switch ((this.options.auth.type || '').toString().toUpperCase()) {
                 case 'OAUTH2': {
                     let oauth2 = new XOAuth2(this.options.auth, this.logger);
-                    oauth2.provisionCallback = (this.pool.mailer && this.pool.mailer.get('oauth2_provision_cb')) || oauth2.provisionCallback;
+                    oauth2.provisionCallback =
+                        (this.pool.mailer && this.pool.mailer.get('oauth2_provision_cb')) || oauth2.provisionCallback;
                     this.auth = {
                         type: 'OAUTH2',
                         user: this.options.auth.user,
@@ -19971,7 +20125,7 @@ class PoolResource extends EventEmitter {
 
                 try {
                     timer.unref();
-                } catch (E) {
+                } catch (_E) {
                     // Ignore. Happens on envs with non-node timer implementation
                 }
             });
@@ -20043,6 +20197,11 @@ class PoolResource extends EventEmitter {
 
         if (mail.data.dsn) {
             envelope.dsn = mail.data.dsn;
+        }
+
+        // RFC 8689: Pass requireTLSExtensionEnabled to envelope for MAIL FROM parameter
+        if (mail.data.requireTLSExtensionEnabled) {
+            envelope.requireTLSExtensionEnabled = mail.data.requireTLSExtensionEnabled;
         }
 
         this.connection.send(envelope, mail.message.createReadStream(), (err, info) => {
@@ -20302,7 +20461,7 @@ class SMTPTransport extends EventEmitter {
 
                 try {
                     timer.unref();
-                } catch (E) {
+                } catch (_E) {
                     // Ignore. Happens on envs with non-node timer implementation
                 }
             });
@@ -20318,6 +20477,11 @@ class SMTPTransport extends EventEmitter {
 
                 if (mail.data.dsn) {
                     envelope.dsn = mail.data.dsn;
+                }
+
+                // RFC 8689: Pass requireTLSExtensionEnabled to envelope for MAIL FROM parameter
+                if (mail.data.requireTLSExtensionEnabled) {
+                    envelope.requireTLSExtensionEnabled = mail.data.requireTLSExtensionEnabled;
                 }
 
                 this.logger.info(
@@ -20799,6 +20963,9 @@ class XOAuth2 extends Stream {
             let timeout = Math.max(Number(this.options.timeout) || 0, 0);
             this.expires = (timeout && Date.now() + timeout * 1000) || 0;
         }
+
+        this.renewing = false; // Track if renewal is in progress
+        this.renewalQueue = []; // Queue for pending requests during renewal
     }
 
     /**
@@ -20809,14 +20976,61 @@ class XOAuth2 extends Stream {
      */
     getToken(renew, callback) {
         if (!renew && this.accessToken && (!this.expires || this.expires > Date.now())) {
+            this.logger.debug(
+                {
+                    tnx: 'OAUTH2',
+                    user: this.options.user,
+                    action: 'reuse'
+                },
+                'Reusing existing access token for %s',
+                this.options.user
+            );
             return callback(null, this.accessToken);
         }
 
-        let generateCallback = (...args) => {
-            if (args[0]) {
+        // check if it is possible to renew, if not, return the current token or error
+        if (!this.provisionCallback && !this.options.refreshToken && !this.options.serviceClient) {
+            if (this.accessToken) {
+                this.logger.debug(
+                    {
+                        tnx: 'OAUTH2',
+                        user: this.options.user,
+                        action: 'reuse'
+                    },
+                    'Reusing existing access token (no refresh capability) for %s',
+                    this.options.user
+                );
+                return callback(null, this.accessToken);
+            }
+            this.logger.error(
+                {
+                    tnx: 'OAUTH2',
+                    user: this.options.user,
+                    action: 'renew'
+                },
+                'Cannot renew access token for %s: No refresh mechanism available',
+                this.options.user
+            );
+            return callback(new Error("Can't create new access token for user"));
+        }
+
+        // If renewal already in progress, queue this request instead of starting another
+        if (this.renewing) {
+            return this.renewalQueue.push({ renew, callback });
+        }
+
+        this.renewing = true;
+
+        // Handles token renewal completion - processes queued requests and cleans up
+        const generateCallback = (err, accessToken) => {
+            this.renewalQueue.forEach(item => item.callback(err, accessToken));
+            this.renewalQueue = [];
+            this.renewing = false;
+
+            if (err) {
                 this.logger.error(
                     {
-                        err: args[0],
+                        err,
                         tnx: 'OAUTH2',
                         user: this.options.user,
                         action: 'renew'
@@ -20835,7 +21049,8 @@ class XOAuth2 extends Stream {
                     this.options.user
                 );
             }
-            callback(...args);
+            // Complete original request
+            callback(err, accessToken);
         };
 
         if (this.provisionCallback) {
@@ -20893,8 +21108,8 @@ class XOAuth2 extends Stream {
             let token;
             try {
                 token = this.jwtSignRS256(tokenData);
-            } catch (err) {
-                return callback(new Error('Can\x27t generate token. Check your auth options'));
+            } catch (_err) {
+                return callback(new Error("Can't generate token. Check your auth options"));
             }
 
             urlOptions = {
@@ -20908,7 +21123,7 @@ class XOAuth2 extends Stream {
             };
         } else {
             if (!this.options.refreshToken) {
-                return callback(new Error('Can\x27t create new access token for user'));
+                return callback(new Error("Can't create new access token for user"));
             }
 
             // web app - https://developers.google.com/identity/protocols/OAuth2WebServer
@@ -52136,7 +52351,7 @@ module.exports = /*#__PURE__*/JSON.parse('{"application/1d-interleaved-parityfec
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"126":{"host":"smtp.126.com","port":465,"secure":true},"163":{"host":"smtp.163.com","port":465,"secure":true},"1und1":{"host":"smtp.1und1.de","port":465,"secure":true,"authMethod":"LOGIN"},"Aliyun":{"domains":["aliyun.com"],"host":"smtp.aliyun.com","port":465,"secure":true},"AOL":{"domains":["aol.com"],"host":"smtp.aol.com","port":587},"Bluewin":{"host":"smtpauths.bluewin.ch","domains":["bluewin.ch"],"port":465},"DebugMail":{"host":"debugmail.io","port":25},"DynectEmail":{"aliases":["Dynect"],"host":"smtp.dynect.net","port":25},"Ethereal":{"aliases":["ethereal.email"],"host":"smtp.ethereal.email","port":587},"FastMail":{"domains":["fastmail.fm"],"host":"smtp.fastmail.com","port":465,"secure":true},"Forward Email":{"aliases":["FE","ForwardEmail"],"domains":["forwardemail.net"],"host":"smtp.forwardemail.net","port":465,"secure":true},"Feishu Mail":{"aliases":["Feishu","FeishuMail"],"domains":["www.feishu.cn"],"host":"smtp.feishu.cn","port":465,"secure":true},"GandiMail":{"aliases":["Gandi","Gandi Mail"],"host":"mail.gandi.net","port":587},"Gmail":{"aliases":["Google Mail"],"domains":["gmail.com","googlemail.com"],"host":"smtp.gmail.com","port":465,"secure":true},"Godaddy":{"host":"smtpout.secureserver.net","port":25},"GodaddyAsia":{"host":"smtp.asia.secureserver.net","port":25},"GodaddyEurope":{"host":"smtp.europe.secureserver.net","port":25},"hot.ee":{"host":"mail.hot.ee"},"Hotmail":{"aliases":["Outlook","Outlook.com","Hotmail.com"],"domains":["hotmail.com","outlook.com"],"host":"smtp-mail.outlook.com","port":587},"iCloud":{"aliases":["Me","Mac"],"domains":["me.com","mac.com"],"host":"smtp.mail.me.com","port":587},"Infomaniak":{"host":"mail.infomaniak.com","domains":["ik.me","ikmail.com","etik.com"],"port":587},"Loopia":{"host":"mailcluster.loopia.se","port":465},"mail.ee":{"host":"smtp.mail.ee"},"Mail.ru":{"host":"smtp.mail.ru","port":465,"secure":true},"Mailcatch.app":{"host":"sandbox-smtp.mailcatch.app","port":2525},"Maildev":{"port":1025,"ignoreTLS":true},"Mailgun":{"host":"smtp.mailgun.org","port":465,"secure":true},"Mailjet":{"host":"in.mailjet.com","port":587},"Mailosaur":{"host":"mailosaur.io","port":25},"Mailtrap":{"host":"live.smtp.mailtrap.io","port":587},"Mandrill":{"host":"smtp.mandrillapp.com","port":587},"Naver":{"host":"smtp.naver.com","port":587},"One":{"host":"send.one.com","port":465,"secure":true},"OpenMailBox":{"aliases":["OMB","openmailbox.org"],"host":"smtp.openmailbox.org","port":465,"secure":true},"Outlook365":{"host":"smtp.office365.com","port":587,"secure":false},"OhMySMTP":{"host":"smtp.ohmysmtp.com","port":587,"secure":false},"Postmark":{"aliases":["PostmarkApp"],"host":"smtp.postmarkapp.com","port":2525},"Proton":{"aliases":["ProtonMail","Proton.me","Protonmail.com","Protonmail.ch"],"domains":["proton.me","protonmail.com","pm.me","protonmail.ch"],"host":"smtp.protonmail.ch","port":587,"requireTLS":true},"qiye.aliyun":{"host":"smtp.mxhichina.com","port":"465","secure":true},"QQ":{"domains":["qq.com"],"host":"smtp.qq.com","port":465,"secure":true},"QQex":{"aliases":["QQ Enterprise"],"domains":["exmail.qq.com"],"host":"smtp.exmail.qq.com","port":465,"secure":true},"SendCloud":{"host":"smtp.sendcloud.net","port":2525},"SendGrid":{"host":"smtp.sendgrid.net","port":587},"SendinBlue":{"aliases":["Brevo"],"host":"smtp-relay.brevo.com","port":587},"SendPulse":{"host":"smtp-pulse.com","port":465,"secure":true},"SES":{"host":"email-smtp.us-east-1.amazonaws.com","port":465,"secure":true},"SES-US-EAST-1":{"host":"email-smtp.us-east-1.amazonaws.com","port":465,"secure":true},"SES-US-WEST-2":{"host":"email-smtp.us-west-2.amazonaws.com","port":465,"secure":true},"SES-EU-WEST-1":{"host":"email-smtp.eu-west-1.amazonaws.com","port":465,"secure":true},"SES-AP-SOUTH-1":{"host":"email-smtp.ap-south-1.amazonaws.com","port":465,"secure":true},"SES-AP-NORTHEAST-1":{"host":"email-smtp.ap-northeast-1.amazonaws.com","port":465,"secure":true},"SES-AP-NORTHEAST-2":{"host":"email-smtp.ap-northeast-2.amazonaws.com","port":465,"secure":true},"SES-AP-NORTHEAST-3":{"host":"email-smtp.ap-northeast-3.amazonaws.com","port":465,"secure":true},"SES-AP-SOUTHEAST-1":{"host":"email-smtp.ap-southeast-1.amazonaws.com","port":465,"secure":true},"SES-AP-SOUTHEAST-2":{"host":"email-smtp.ap-southeast-2.amazonaws.com","port":465,"secure":true},"Seznam":{"aliases":["Seznam Email"],"domains":["seznam.cz","email.cz","post.cz","spoluzaci.cz"],"host":"smtp.seznam.cz","port":465,"secure":true},"Sparkpost":{"aliases":["SparkPost","SparkPost Mail"],"domains":["sparkpost.com"],"host":"smtp.sparkpostmail.com","port":587,"secure":false},"Tipimail":{"host":"smtp.tipimail.com","port":587},"Yahoo":{"domains":["yahoo.com"],"host":"smtp.mail.yahoo.com","port":465,"secure":true},"Yandex":{"domains":["yandex.ru"],"host":"smtp.yandex.ru","port":465,"secure":true},"Zoho":{"host":"smtp.zoho.com","port":465,"secure":true,"authMethod":"LOGIN"}}');
+module.exports = /*#__PURE__*/JSON.parse('{"126":{"description":"126 Mail (NetEase)","host":"smtp.126.com","port":465,"secure":true},"163":{"description":"163 Mail (NetEase)","host":"smtp.163.com","port":465,"secure":true},"1und1":{"description":"1&1 Mail (German hosting provider)","host":"smtp.1und1.de","port":465,"secure":true,"authMethod":"LOGIN"},"Aliyun":{"description":"Alibaba Cloud Mail","domains":["aliyun.com"],"host":"smtp.aliyun.com","port":465,"secure":true},"AliyunQiye":{"description":"Alibaba Cloud Enterprise Mail","host":"smtp.qiye.aliyun.com","port":465,"secure":true},"AOL":{"description":"AOL Mail","domains":["aol.com"],"host":"smtp.aol.com","port":587},"Aruba":{"description":"Aruba PEC (Italian email provider)","domains":["aruba.it","pec.aruba.it"],"aliases":["Aruba PEC"],"host":"smtps.aruba.it","port":465,"secure":true,"authMethod":"LOGIN"},"Bluewin":{"description":"Bluewin (Swiss email provider)","host":"smtpauths.bluewin.ch","domains":["bluewin.ch"],"port":465},"BOL":{"description":"BOL Mail (Brazilian provider)","domains":["bol.com.br"],"host":"smtp.bol.com.br","port":587,"requireTLS":true},"DebugMail":{"description":"DebugMail (email testing service)","host":"debugmail.io","port":25},"Disroot":{"description":"Disroot (privacy-focused provider)","domains":["disroot.org"],"host":"disroot.org","port":587,"secure":false,"authMethod":"LOGIN"},"DynectEmail":{"description":"Dyn Email Delivery","aliases":["Dynect"],"host":"smtp.dynect.net","port":25},"ElasticEmail":{"description":"Elastic Email","aliases":["Elastic Email"],"host":"smtp.elasticemail.com","port":465,"secure":true},"Ethereal":{"description":"Ethereal Email (email testing service)","aliases":["ethereal.email"],"host":"smtp.ethereal.email","port":587},"FastMail":{"description":"FastMail","domains":["fastmail.fm"],"host":"smtp.fastmail.com","port":465,"secure":true},"Feishu Mail":{"description":"Feishu Mail (Lark)","aliases":["Feishu","FeishuMail"],"domains":["www.feishu.cn"],"host":"smtp.feishu.cn","port":465,"secure":true},"Forward Email":{"description":"Forward Email (email forwarding service)","aliases":["FE","ForwardEmail"],"domains":["forwardemail.net"],"host":"smtp.forwardemail.net","port":465,"secure":true},"GandiMail":{"description":"Gandi Mail","aliases":["Gandi","Gandi Mail"],"host":"mail.gandi.net","port":587},"Gmail":{"description":"Gmail","aliases":["Google Mail"],"domains":["gmail.com","googlemail.com"],"host":"smtp.gmail.com","port":465,"secure":true},"GMX":{"description":"GMX Mail","domains":["gmx.com","gmx.net","gmx.de"],"host":"mail.gmx.com","port":587},"Godaddy":{"description":"GoDaddy Email (US)","host":"smtpout.secureserver.net","port":25},"GodaddyAsia":{"description":"GoDaddy Email (Asia)","host":"smtp.asia.secureserver.net","port":25},"GodaddyEurope":{"description":"GoDaddy Email (Europe)","host":"smtp.europe.secureserver.net","port":25},"hot.ee":{"description":"Hot.ee (Estonian email provider)","host":"mail.hot.ee"},"Hotmail":{"description":"Outlook.com / Hotmail","aliases":["Outlook","Outlook.com","Hotmail.com"],"domains":["hotmail.com","outlook.com"],"host":"smtp-mail.outlook.com","port":587},"iCloud":{"description":"iCloud Mail","aliases":["Me","Mac"],"domains":["me.com","mac.com"],"host":"smtp.mail.me.com","port":587},"Infomaniak":{"description":"Infomaniak Mail (Swiss hosting provider)","host":"mail.infomaniak.com","domains":["ik.me","ikmail.com","etik.com"],"port":587},"KolabNow":{"description":"KolabNow (secure email service)","domains":["kolabnow.com"],"aliases":["Kolab"],"host":"smtp.kolabnow.com","port":465,"secure":true,"authMethod":"LOGIN"},"Loopia":{"description":"Loopia (Swedish hosting provider)","host":"mailcluster.loopia.se","port":465},"Loops":{"description":"Loops","host":"smtp.loops.so","port":587},"mail.ee":{"description":"Mail.ee (Estonian email provider)","host":"smtp.mail.ee"},"Mail.ru":{"description":"Mail.ru","host":"smtp.mail.ru","port":465,"secure":true},"Mailcatch.app":{"description":"Mailcatch (email testing service)","host":"sandbox-smtp.mailcatch.app","port":2525},"Maildev":{"description":"MailDev (local email testing)","port":1025,"ignoreTLS":true},"MailerSend":{"description":"MailerSend","host":"smtp.mailersend.net","port":587},"Mailgun":{"description":"Mailgun","host":"smtp.mailgun.org","port":465,"secure":true},"Mailjet":{"description":"Mailjet","host":"in.mailjet.com","port":587},"Mailosaur":{"description":"Mailosaur (email testing service)","host":"mailosaur.io","port":25},"Mailtrap":{"description":"Mailtrap","host":"live.smtp.mailtrap.io","port":587},"Mandrill":{"description":"Mandrill (by Mailchimp)","host":"smtp.mandrillapp.com","port":587},"Naver":{"description":"Naver Mail (Korean email provider)","host":"smtp.naver.com","port":587},"OhMySMTP":{"description":"OhMySMTP (email delivery service)","host":"smtp.ohmysmtp.com","port":587,"secure":false},"One":{"description":"One.com Email","host":"send.one.com","port":465,"secure":true},"OpenMailBox":{"description":"OpenMailBox","aliases":["OMB","openmailbox.org"],"host":"smtp.openmailbox.org","port":465,"secure":true},"Outlook365":{"description":"Microsoft 365 / Office 365","host":"smtp.office365.com","port":587,"secure":false},"Postmark":{"description":"Postmark","aliases":["PostmarkApp"],"host":"smtp.postmarkapp.com","port":2525},"Proton":{"description":"Proton Mail","aliases":["ProtonMail","Proton.me","Protonmail.com","Protonmail.ch"],"domains":["proton.me","protonmail.com","pm.me","protonmail.ch"],"host":"smtp.protonmail.ch","port":587,"requireTLS":true},"qiye.aliyun":{"description":"Alibaba Mail Enterprise Edition","host":"smtp.mxhichina.com","port":"465","secure":true},"QQ":{"description":"QQ Mail","domains":["qq.com"],"host":"smtp.qq.com","port":465,"secure":true},"QQex":{"description":"QQ Enterprise Mail","aliases":["QQ Enterprise"],"domains":["exmail.qq.com"],"host":"smtp.exmail.qq.com","port":465,"secure":true},"Resend":{"description":"Resend","host":"smtp.resend.com","port":465,"secure":true},"Runbox":{"description":"Runbox (Norwegian email provider)","domains":["runbox.com"],"host":"smtp.runbox.com","port":465,"secure":true},"SendCloud":{"description":"SendCloud (Chinese email delivery)","host":"smtp.sendcloud.net","port":2525},"SendGrid":{"description":"SendGrid","host":"smtp.sendgrid.net","port":587},"SendinBlue":{"description":"Brevo (formerly Sendinblue)","aliases":["Brevo"],"host":"smtp-relay.brevo.com","port":587},"SendPulse":{"description":"SendPulse","host":"smtp-pulse.com","port":465,"secure":true},"SES":{"description":"AWS SES US East (N. Virginia)","host":"email-smtp.us-east-1.amazonaws.com","port":465,"secure":true},"SES-AP-NORTHEAST-1":{"description":"AWS SES Asia Pacific (Tokyo)","host":"email-smtp.ap-northeast-1.amazonaws.com","port":465,"secure":true},"SES-AP-NORTHEAST-2":{"description":"AWS SES Asia Pacific (Seoul)","host":"email-smtp.ap-northeast-2.amazonaws.com","port":465,"secure":true},"SES-AP-NORTHEAST-3":{"description":"AWS SES Asia Pacific (Osaka)","host":"email-smtp.ap-northeast-3.amazonaws.com","port":465,"secure":true},"SES-AP-SOUTH-1":{"description":"AWS SES Asia Pacific (Mumbai)","host":"email-smtp.ap-south-1.amazonaws.com","port":465,"secure":true},"SES-AP-SOUTHEAST-1":{"description":"AWS SES Asia Pacific (Singapore)","host":"email-smtp.ap-southeast-1.amazonaws.com","port":465,"secure":true},"SES-AP-SOUTHEAST-2":{"description":"AWS SES Asia Pacific (Sydney)","host":"email-smtp.ap-southeast-2.amazonaws.com","port":465,"secure":true},"SES-CA-CENTRAL-1":{"description":"AWS SES Canada (Central)","host":"email-smtp.ca-central-1.amazonaws.com","port":465,"secure":true},"SES-EU-CENTRAL-1":{"description":"AWS SES Europe (Frankfurt)","host":"email-smtp.eu-central-1.amazonaws.com","port":465,"secure":true},"SES-EU-NORTH-1":{"description":"AWS SES Europe (Stockholm)","host":"email-smtp.eu-north-1.amazonaws.com","port":465,"secure":true},"SES-EU-WEST-1":{"description":"AWS SES Europe (Ireland)","host":"email-smtp.eu-west-1.amazonaws.com","port":465,"secure":true},"SES-EU-WEST-2":{"description":"AWS SES Europe (London)","host":"email-smtp.eu-west-2.amazonaws.com","port":465,"secure":true},"SES-EU-WEST-3":{"description":"AWS SES Europe (Paris)","host":"email-smtp.eu-west-3.amazonaws.com","port":465,"secure":true},"SES-SA-EAST-1":{"description":"AWS SES South America (São Paulo)","host":"email-smtp.sa-east-1.amazonaws.com","port":465,"secure":true},"SES-US-EAST-1":{"description":"AWS SES US East (N. Virginia)","host":"email-smtp.us-east-1.amazonaws.com","port":465,"secure":true},"SES-US-EAST-2":{"description":"AWS SES US East (Ohio)","host":"email-smtp.us-east-2.amazonaws.com","port":465,"secure":true},"SES-US-GOV-EAST-1":{"description":"AWS SES GovCloud (US-East)","host":"email-smtp.us-gov-east-1.amazonaws.com","port":465,"secure":true},"SES-US-GOV-WEST-1":{"description":"AWS SES GovCloud (US-West)","host":"email-smtp.us-gov-west-1.amazonaws.com","port":465,"secure":true},"SES-US-WEST-1":{"description":"AWS SES US West (N. California)","host":"email-smtp.us-west-1.amazonaws.com","port":465,"secure":true},"SES-US-WEST-2":{"description":"AWS SES US West (Oregon)","host":"email-smtp.us-west-2.amazonaws.com","port":465,"secure":true},"Seznam":{"description":"Seznam Email (Czech email provider)","aliases":["Seznam Email"],"domains":["seznam.cz","email.cz","post.cz","spoluzaci.cz"],"host":"smtp.seznam.cz","port":465,"secure":true},"SMTP2GO":{"description":"SMTP2GO","host":"mail.smtp2go.com","port":2525},"Sparkpost":{"description":"SparkPost","aliases":["SparkPost","SparkPost Mail"],"domains":["sparkpost.com"],"host":"smtp.sparkpostmail.com","port":587,"secure":false},"Tipimail":{"description":"Tipimail (email delivery service)","host":"smtp.tipimail.com","port":587},"Tutanota":{"description":"Tutanota (Tuta Mail)","domains":["tutanota.com","tuta.com","tutanota.de","tuta.io"],"host":"smtp.tutanota.com","port":465,"secure":true},"Yahoo":{"description":"Yahoo Mail","domains":["yahoo.com"],"host":"smtp.mail.yahoo.com","port":465,"secure":true},"Yandex":{"description":"Yandex Mail","domains":["yandex.ru"],"host":"smtp.yandex.ru","port":465,"secure":true},"Zimbra":{"description":"Zimbra Mail Server","aliases":["Zimbra Collaboration"],"host":"smtp.zimbra.com","port":587,"requireTLS":true},"Zoho":{"description":"Zoho Mail","host":"smtp.zoho.com","port":465,"secure":true,"authMethod":"LOGIN"}}');
 
 /***/ }),
 
@@ -52144,7 +52359,7 @@ module.exports = /*#__PURE__*/JSON.parse('{"126":{"host":"smtp.126.com","port":4
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"nodemailer","version":"6.10.1","description":"Easy as cake e-mail sending from your Node.js applications","main":"lib/nodemailer.js","scripts":{"test":"node --test --test-concurrency=1 test/**/*.test.js test/**/*-test.js","test:coverage":"c8 node --test --test-concurrency=1 test/**/*.test.js test/**/*-test.js","lint":"eslint .","update":"rm -rf node_modules/ package-lock.json && ncu -u && npm install"},"repository":{"type":"git","url":"https://github.com/nodemailer/nodemailer.git"},"keywords":["Nodemailer"],"author":"Andris Reinman","license":"MIT-0","bugs":{"url":"https://github.com/nodemailer/nodemailer/issues"},"homepage":"https://nodemailer.com/","devDependencies":{"@aws-sdk/client-ses":"3.731.1","bunyan":"1.8.15","c8":"10.1.3","eslint":"8.57.0","eslint-config-nodemailer":"1.2.0","eslint-config-prettier":"9.1.0","libbase64":"1.3.0","libmime":"5.3.6","libqp":"2.1.1","nodemailer-ntlm-auth":"1.0.4","proxy":"1.0.2","proxy-test-server":"1.0.0","smtp-server":"3.13.6"},"engines":{"node":">=6.0.0"}}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"nodemailer","version":"7.0.13","description":"Easy as cake e-mail sending from your Node.js applications","main":"lib/nodemailer.js","scripts":{"test":"node --test --test-concurrency=1 test/**/*.test.js test/**/*-test.js","test:coverage":"c8 node --test --test-concurrency=1 test/**/*.test.js test/**/*-test.js","format":"prettier --write \\"**/*.{js,json,md}\\"","format:check":"prettier --check \\"**/*.{js,json,md}\\"","lint":"eslint .","lint:fix":"eslint . --fix","update":"rm -rf node_modules/ package-lock.json && ncu -u && npm install"},"repository":{"type":"git","url":"https://github.com/nodemailer/nodemailer.git"},"keywords":["Nodemailer"],"author":"Andris Reinman","license":"MIT-0","bugs":{"url":"https://github.com/nodemailer/nodemailer/issues"},"homepage":"https://nodemailer.com/","devDependencies":{"@aws-sdk/client-sesv2":"3.975.0","bunyan":"1.8.15","c8":"10.1.3","eslint":"9.39.2","eslint-config-prettier":"10.1.8","globals":"17.1.0","libbase64":"1.3.0","libmime":"5.3.7","libqp":"2.1.1","nodemailer-ntlm-auth":"1.0.4","prettier":"3.8.1","proxy":"1.0.2","proxy-test-server":"1.0.0","smtp-server":"3.18.0"},"engines":{"node":">=6.0.0"}}');
 
 /***/ })
 
