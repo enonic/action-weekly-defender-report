@@ -1,0 +1,37 @@
+name: Weekly Defender Vulnerability Report
+
+on:
+  # Run every Monday at 01:00 UTC
+  schedule:
+    - cron: '0 1 * * 1'
+
+  # Allow manual execution with device selection
+  workflow_dispatch:
+    inputs:
+      device-name:
+        description: 'Device name to process (leave empty for all devices)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  send-reports:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Send vulnerability reports
+        uses: ./
+        with:
+          tenant-id: '391eb9f6-3a99-4286-ae83-9ab26ad79c7f'
+          client-id: '2751bf1a-e192-49c1-b4b5-c18806e973dc'
+          client-secret: ${{ secrets.DEFENDER_REPORT_CLIENT_SECRET }}
+          device-name: ${{ github.event.inputs.device-name || '' }}
+          smtp-host: ${{ secrets.SMTP_HOST }}
+          smtp-port: ${{ secrets.SMTP_PORT || '587' }}
+          smtp-user: ${{ secrets.SMTP_USER }}
+          smtp-password: ${{ secrets.SMTP_PASSWORD }}
+          smtp-from: ${{ secrets.SMTP_FROM || 'security-reports@enonic.com' }}
+          device-owners-file: 'device-owners.json'
