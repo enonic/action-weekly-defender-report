@@ -49680,14 +49680,14 @@ class EmailSender {
         summaryText += `- ${recommendationCount} security recommendation(s)\n\n`;
         summaryText += `Please see the HTML version of this email for detailed information.\n`;
         try {
-            await this.transporter.sendMail({
+            const info = await this.transporter.sendMail({
                 from: this.config.from,
                 to: report.owner.ownerEmail,
                 subject: subject,
                 text: summaryText,
                 html: htmlContent
             });
-            console.log(`✅ Report sent successfully to ${report.owner.ownerEmail}`);
+            console.log(`✅ Report sent successfully to ${report.owner.ownerEmail} (message ID: ${info.messageId})`);
         }
         catch (error) {
             console.error(`❌ Failed to send email to ${report.owner.ownerEmail}:`, error);
