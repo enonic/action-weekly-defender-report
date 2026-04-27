@@ -29,9 +29,9 @@ jobs:
           client-id: '2751bf1a-e192-49c1-b4b5-c18806e973dc'
           client-secret: ${{ secrets.DEFENDER_REPORT_CLIENT_SECRET }}
           device-name: ${{ github.event.inputs.device-name || '' }}
-          smtp-host: ${{ secrets.SMTP_HOST }}
-          smtp-port: ${{ secrets.SMTP_PORT || '587' }}
-          smtp-user: ${{ secrets.SMTP_USER }}
+          smtp-host: ${{ vars.SMTP_HOST }}
+          smtp-port: ${{ vars.SMTP_PORT || '587' }}
+          smtp-user: ${{ vars.SMTP_USER }}
           smtp-password: ${{ secrets.SMTP_PASSWORD }}
-          smtp-from: ${{ secrets.SMTP_FROM || 'security-reports@enonic.com' }}
+          smtp-from: ${{ vars.SMTP_FROM || 'security-reports@enonic.com' }}
           device-owners-file: 'device-owners.json'
