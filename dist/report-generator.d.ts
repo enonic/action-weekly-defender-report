@@ -4,7 +4,6 @@ export declare class ReportGenerator {
     private escapeHtml;
     private renderIncidents;
     private renderRecommendations;
-    private renderSoftware;
     private renderVulnerabilities;
     private renderSeverityBadge;
 }

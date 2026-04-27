@@ -1,4 +1,4 @@
-import { DefenderDevice, VulnerabilityInfo, SecurityRecommendation, IncidentAlert, SoftwareInventory } from './types';
+import { DefenderDevice, VulnerabilityInfo, SecurityRecommendation, IncidentAlert } from './types';
 export declare class DefenderClient {
     private tenantId;
     private clientId;
@@ -14,5 +14,4 @@ export declare class DefenderClient {
     getDeviceVulnerabilities(deviceId: string): Promise<VulnerabilityInfo[]>;
     getDeviceRecommendations(deviceId: string): Promise<SecurityRecommendation[]>;
     getDeviceAlerts(deviceId: string): Promise<IncidentAlert[]>;
-    getDeviceSoftware(deviceId: string): Promise<SoftwareInventory[]>;
 }

@@ -47,21 +47,11 @@ export interface IncidentAlert {
   lastUpdateTime: string;
 }
 
-export interface SoftwareInventory {
-  id: string;
-  name: string;
-  vendor: string;
-  version: string;
-  numberOfWeaknesses: number;
-  installedOn?: string;
-}
-
 export interface DeviceReport {
   device: DefenderDevice;
   owner: DeviceOwner;
   incidents: IncidentAlert[];
   recommendations: SecurityRecommendation[];
   vulnerabilities: VulnerabilityInfo[];
-  software: SoftwareInventory[];
   configurations?: any[];
 }

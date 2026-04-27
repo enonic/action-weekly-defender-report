@@ -2,7 +2,7 @@ import { DeviceReport } from './types';
 
 export class ReportGenerator {
   generateHtmlReport(report: DeviceReport): string {
-    const { device, owner, incidents, recommendations, vulnerabilities, software } = report;
+    const { device, owner, incidents, recommendations, vulnerabilities } = report;
 
     return `
 <!DOCTYPE html>
@@ -188,7 +188,7 @@ export class ReportGenerator {
     <h1>🛡️ Weekly Security Report</h1>
     <p><strong>Device:</strong> ${this.escapeHtml(device.computerDnsName)}</p>
     <p><strong>Owner:</strong> ${this.escapeHtml(owner.ownerName)} (${this.escapeHtml(owner.ownerEmail)})</p>
-    <p><strong>Report Date:</strong> ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
+    <p><strong>Report Date:</strong> ${new Date().toLocaleString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</p>
   </div>
 
   <div class="section">
@@ -229,11 +229,6 @@ export class ReportGenerator {
   <div class="section">
     <h2>💡 Security Recommendations</h2>
     ${this.renderRecommendations(recommendations)}
-  </div>
-
-  <div class="section">
-    <h2>📦 Software Inventory</h2>
-    ${this.renderSoftware(software)}
   </div>
 
   <div class="section">
@@ -320,38 +315,6 @@ export class ReportGenerator {
               <td>${this.escapeHtml(rec.vendor || 'N/A')}</td>
             </tr>
           `).join('')}
-        </tbody>
-      </table>
-    `;
-  }
-
-  private renderSoftware(software: any[]): string {
-    if (!software || software.length === 0) {
-      return '<div class="empty-state">No software inventory available</div>';
-    }
-
-    return `
-      <table>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Vendor</th>
-            <th>Version</th>
-            <th>Weaknesses</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${software.slice(0, 50).map(sw => `
-            <tr>
-              <td>${this.escapeHtml(sw.name || 'N/A')}</td>
-              <td>${this.escapeHtml(sw.vendor || 'N/A')}</td>
-              <td>${this.escapeHtml(sw.version || 'N/A')}</td>
-              <td>
-                ${sw.numberOfWeaknesses > 0 ? `<span class="badge badge-danger">${sw.numberOfWeaknesses}</span>` : '<span class="badge badge-success">0</span>'}
-              </td>
-            </tr>
-          `).join('')}
-          ${software.length > 50 ? `<tr><td colspan="4" style="text-align: center; font-style: italic; color: #605e5c;">... and ${software.length - 50} more items</td></tr>` : ''}
         </tbody>
       </table>
     `;

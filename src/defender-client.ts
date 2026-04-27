@@ -1,5 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
-import { DefenderDevice, VulnerabilityInfo, SecurityRecommendation, IncidentAlert, SoftwareInventory } from './types';
+import { DefenderDevice, VulnerabilityInfo, SecurityRecommendation, IncidentAlert } from './types';
 
 export class DefenderClient {
   private accessToken: string = '';
@@ -105,10 +105,4 @@ export class DefenderClient {
     return response.value || [];
   }
 
-  async getDeviceSoftware(deviceId: string): Promise<SoftwareInventory[]> {
-    const response = await this.makeRequest<{ value: SoftwareInventory[] }>(
-      `/machines/${deviceId}/software`
-    );
-    return response.value || [];
-  }
 }

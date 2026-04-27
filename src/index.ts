@@ -88,27 +88,26 @@ async function run(): Promise<void> {
 
         // Gather all report data in parallel, capturing individual errors
         console.log('📊 Gathering report data...');
-        const [incidentsResult, recommendationsResult, vulnerabilitiesResult, softwareResult] = await Promise.allSettled([
+        const [incidentsResult, recommendationsResult, vulnerabilitiesResult] = await Promise.allSettled([
           defenderClient.getDeviceAlerts(device.id),
           defenderClient.getDeviceRecommendations(device.id),
-          defenderClient.getDeviceVulnerabilities(device.id),
-          defenderClient.getDeviceSoftware(device.id)
+          defenderClient.getDeviceVulnerabilities(device.id)
         ]);
 
-        const incidents       = incidentsResult.status       === 'fulfilled' ? incidentsResult.value       : [];
+        const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const allIncidents    = incidentsResult.status       === 'fulfilled' ? incidentsResult.value       : [];
         const recommendations = recommendationsResult.status === 'fulfilled' ? recommendationsResult.value : [];
         const vulnerabilities = vulnerabilitiesResult.status === 'fulfilled' ? vulnerabilitiesResult.value : [];
-        const software        = softwareResult.status        === 'fulfilled' ? softwareResult.value        : [];
+
+        const incidents = allIncidents.filter(i => new Date(i.createdTime) >= oneWeekAgo);
 
         if (incidentsResult.status       === 'rejected') core.warning(`  ⚠️  Failed to fetch alerts for ${deviceOwner.deviceName}: ${incidentsResult.reason}`);
         if (recommendationsResult.status === 'rejected') core.warning(`  ⚠️  Failed to fetch recommendations for ${deviceOwner.deviceName}: ${recommendationsResult.reason}`);
         if (vulnerabilitiesResult.status === 'rejected') core.warning(`  ⚠️  Failed to fetch vulnerabilities for ${deviceOwner.deviceName}: ${vulnerabilitiesResult.reason}`);
-        if (softwareResult.status        === 'rejected') core.warning(`  ⚠️  Failed to fetch software inventory for ${deviceOwner.deviceName}: ${softwareResult.reason}`);
 
-        console.log(`  - ${incidents.length} incident(s)/alert(s)`);
+        console.log(`  - ${incidents.length} incident(s)/alert(s) in the last 7 days (${allIncidents.length} total)`);
         console.log(`  - ${recommendations.length} recommendation(s)`);
         console.log(`  - ${vulnerabilities.length} vulnerabilit(ies)`);
-        console.log(`  - ${software.length} software item(s)`);
 
         // Create report
         const report: DeviceReport = {
@@ -117,7 +116,6 @@ async function run(): Promise<void> {
           incidents,
           recommendations,
           vulnerabilities,
-          software,
           configurations: []
         };
 
