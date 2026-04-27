@@ -28,8 +28,8 @@
   "devDependencies": {
     "@types/node": "^20.11.17",
     "@types/nodemailer": "^6.4.14",
-    "@typescript-eslint/eslint-plugin": "^6.21.0",
-    "@typescript-eslint/parser": "^6.21.0",
+    "@typescript-eslint/eslint-plugin": "^8.59.0",
+    "@typescript-eslint/parser": "^8.59.0",
     "@vercel/ncc": "^0.38.1",
     "eslint": "^8.56.0",
     "prettier": "^3.2.5",
