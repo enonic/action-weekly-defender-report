@@ -49608,69 +49608,33 @@ class DefenderClient {
         }
     }
     async getDeviceByName(deviceName) {
-        try {
-            const response = await this.makeRequest('/machines', {
-                $filter: `computerDnsName eq '${deviceName}'`
-            });
-            if (response.value && response.value.length > 0) {
-                return response.value[0];
-            }
-            return null;
+        const response = await this.makeRequest('/machines', {
+            $filter: `computerDnsName eq '${deviceName}'`
+        });
+        if (response.value && response.value.length > 0) {
+            return response.value[0];
         }
-        catch (error) {
-            console.error(`Failed to get device ${deviceName}:`, error);
-            return null;
-        }
+        return null;
     }
     async getAllDevices() {
-        try {
-            const response = await this.makeRequest('/machines');
-            return response.value || [];
-        }
-        catch (error) {
-            console.error('Failed to get all devices:', error);
-            return [];
-        }
+        const response = await this.makeRequest('/machines');
+        return response.value || [];
     }
     async getDeviceVulnerabilities(deviceId) {
-        try {
-            const response = await this.makeRequest(`/machines/${deviceId}/vulnerabilities`);
-            return response.value || [];
-        }
-        catch (error) {
-            console.error(`Failed to get vulnerabilities for device ${deviceId}:`, error);
-            return [];
-        }
+        const response = await this.makeRequest(`/machines/${deviceId}/vulnerabilities`);
+        return response.value || [];
     }
     async getDeviceRecommendations(deviceId) {
-        try {
-            const response = await this.makeRequest(`/machines/${deviceId}/recommendations`);
-            return response.value || [];
-        }
-        catch (error) {
-            console.error(`Failed to get recommendations for device ${deviceId}:`, error);
-            return [];
-        }
+        const response = await this.makeRequest(`/machines/${deviceId}/recommendations`);
+        return response.value || [];
     }
     async getDeviceAlerts(deviceId) {
-        try {
-            const response = await this.makeRequest(`/machines/${deviceId}/alerts`);
-            return response.value || [];
-        }
-        catch (error) {
-            console.error(`Failed to get alerts for device ${deviceId}:`, error);
-            return [];
-        }
+        const response = await this.makeRequest(`/machines/${deviceId}/alerts`);
+        return response.value || [];
     }
     async getDeviceSoftware(deviceId) {
-        try {
-            const response = await this.makeRequest(`/machines/${deviceId}/software`);
-            return response.value || [];
-        }
-        catch (error) {
-            console.error(`Failed to get software inventory for device ${deviceId}:`, error);
-            return [];
-        }
+        const response = await this.makeRequest(`/machines/${deviceId}/software`);
+        return response.value || [];
     }
 }
 exports.DefenderClient = DefenderClient;
@@ -49853,14 +49817,26 @@ async function run() {
                     continue;
                 }
                 console.log(`✅ Found device in Defender: ${device.computerDnsName} (ID: ${device.id})`);
-                // Gather all report data in parallel
+                // Gather all report data in parallel, capturing individual errors
                 console.log('📊 Gathering report data...');
-                const [incidents, recommendations, vulnerabilities, software] = await Promise.all([
+                const [incidentsResult, recommendationsResult, vulnerabilitiesResult, softwareResult] = await Promise.allSettled([
                     defenderClient.getDeviceAlerts(device.id),
                     defenderClient.getDeviceRecommendations(device.id),
                     defenderClient.getDeviceVulnerabilities(device.id),
                     defenderClient.getDeviceSoftware(device.id)
                 ]);
+                const incidents = incidentsResult.status === 'fulfilled' ? incidentsResult.value : [];
+                const recommendations = recommendationsResult.status === 'fulfilled' ? recommendationsResult.value : [];
+                const vulnerabilities = vulnerabilitiesResult.status === 'fulfilled' ? vulnerabilitiesResult.value : [];
+                const software = softwareResult.status === 'fulfilled' ? softwareResult.value : [];
+                if (incidentsResult.status === 'rejected')
+                    core.warning(`  ⚠️  Failed to fetch alerts for ${deviceOwner.deviceName}: ${incidentsResult.reason}`);
+                if (recommendationsResult.status === 'rejected')
+                    core.warning(`  ⚠️  Failed to fetch recommendations for ${deviceOwner.deviceName}: ${recommendationsResult.reason}`);
+                if (vulnerabilitiesResult.status === 'rejected')
+                    core.warning(`  ⚠️  Failed to fetch vulnerabilities for ${deviceOwner.deviceName}: ${vulnerabilitiesResult.reason}`);
+                if (softwareResult.status === 'rejected')
+                    core.warning(`  ⚠️  Failed to fetch software inventory for ${deviceOwner.deviceName}: ${softwareResult.reason}`);
                 console.log(`  - ${incidents.length} incident(s)/alert(s)`);
                 console.log(`  - ${recommendations.length} recommendation(s)`);
                 console.log(`  - ${vulnerabilities.length} vulnerabilit(ies)`);

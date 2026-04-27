@@ -68,77 +68,47 @@ export class DefenderClient {
   }
 
   async getDeviceByName(deviceName: string): Promise<DefenderDevice | null> {
-    try {
-      const response = await this.makeRequest<{ value: DefenderDevice[] }>('/machines', {
-        $filter: `computerDnsName eq '${deviceName}'`
-      });
+    const response = await this.makeRequest<{ value: DefenderDevice[] }>('/machines', {
+      $filter: `computerDnsName eq '${deviceName}'`
+    });
 
-      if (response.value && response.value.length > 0) {
-        return response.value[0];
-      }
-
-      return null;
-    } catch (error) {
-      console.error(`Failed to get device ${deviceName}:`, error);
-      return null;
+    if (response.value && response.value.length > 0) {
+      return response.value[0];
     }
+
+    return null;
   }
 
   async getAllDevices(): Promise<DefenderDevice[]> {
-    try {
-      const response = await this.makeRequest<{ value: DefenderDevice[] }>('/machines');
-      return response.value || [];
-    } catch (error) {
-      console.error('Failed to get all devices:', error);
-      return [];
-    }
+    const response = await this.makeRequest<{ value: DefenderDevice[] }>('/machines');
+    return response.value || [];
   }
 
   async getDeviceVulnerabilities(deviceId: string): Promise<VulnerabilityInfo[]> {
-    try {
-      const response = await this.makeRequest<{ value: VulnerabilityInfo[] }>(
-        `/machines/${deviceId}/vulnerabilities`
-      );
-      return response.value || [];
-    } catch (error) {
-      console.error(`Failed to get vulnerabilities for device ${deviceId}:`, error);
-      return [];
-    }
+    const response = await this.makeRequest<{ value: VulnerabilityInfo[] }>(
+      `/machines/${deviceId}/vulnerabilities`
+    );
+    return response.value || [];
   }
 
   async getDeviceRecommendations(deviceId: string): Promise<SecurityRecommendation[]> {
-    try {
-      const response = await this.makeRequest<{ value: SecurityRecommendation[] }>(
-        `/machines/${deviceId}/recommendations`
-      );
-      return response.value || [];
-    } catch (error) {
-      console.error(`Failed to get recommendations for device ${deviceId}:`, error);
-      return [];
-    }
+    const response = await this.makeRequest<{ value: SecurityRecommendation[] }>(
+      `/machines/${deviceId}/recommendations`
+    );
+    return response.value || [];
   }
 
   async getDeviceAlerts(deviceId: string): Promise<IncidentAlert[]> {
-    try {
-      const response = await this.makeRequest<{ value: IncidentAlert[] }>(
-        `/machines/${deviceId}/alerts`
-      );
-      return response.value || [];
-    } catch (error) {
-      console.error(`Failed to get alerts for device ${deviceId}:`, error);
-      return [];
-    }
+    const response = await this.makeRequest<{ value: IncidentAlert[] }>(
+      `/machines/${deviceId}/alerts`
+    );
+    return response.value || [];
   }
 
   async getDeviceSoftware(deviceId: string): Promise<SoftwareInventory[]> {
-    try {
-      const response = await this.makeRequest<{ value: SoftwareInventory[] }>(
-        `/machines/${deviceId}/software`
-      );
-      return response.value || [];
-    } catch (error) {
-      console.error(`Failed to get software inventory for device ${deviceId}:`, error);
-      return [];
-    }
+    const response = await this.makeRequest<{ value: SoftwareInventory[] }>(
+      `/machines/${deviceId}/software`
+    );
+    return response.value || [];
   }
 }

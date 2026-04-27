@@ -86,14 +86,24 @@ async function run(): Promise<void> {
 
         console.log(`✅ Found device in Defender: ${device.computerDnsName} (ID: ${device.id})`);
 
-        // Gather all report data in parallel
+        // Gather all report data in parallel, capturing individual errors
         console.log('📊 Gathering report data...');
-        const [incidents, recommendations, vulnerabilities, software] = await Promise.all([
+        const [incidentsResult, recommendationsResult, vulnerabilitiesResult, softwareResult] = await Promise.allSettled([
           defenderClient.getDeviceAlerts(device.id),
           defenderClient.getDeviceRecommendations(device.id),
           defenderClient.getDeviceVulnerabilities(device.id),
           defenderClient.getDeviceSoftware(device.id)
         ]);
+
+        const incidents       = incidentsResult.status       === 'fulfilled' ? incidentsResult.value       : [];
+        const recommendations = recommendationsResult.status === 'fulfilled' ? recommendationsResult.value : [];
+        const vulnerabilities = vulnerabilitiesResult.status === 'fulfilled' ? vulnerabilitiesResult.value : [];
+        const software        = softwareResult.status        === 'fulfilled' ? softwareResult.value        : [];
+
+        if (incidentsResult.status       === 'rejected') core.warning(`  ⚠️  Failed to fetch alerts for ${deviceOwner.deviceName}: ${incidentsResult.reason}`);
+        if (recommendationsResult.status === 'rejected') core.warning(`  ⚠️  Failed to fetch recommendations for ${deviceOwner.deviceName}: ${recommendationsResult.reason}`);
+        if (vulnerabilitiesResult.status === 'rejected') core.warning(`  ⚠️  Failed to fetch vulnerabilities for ${deviceOwner.deviceName}: ${vulnerabilitiesResult.reason}`);
+        if (softwareResult.status        === 'rejected') core.warning(`  ⚠️  Failed to fetch software inventory for ${deviceOwner.deviceName}: ${softwareResult.reason}`);
 
         console.log(`  - ${incidents.length} incident(s)/alert(s)`);
         console.log(`  - ${recommendations.length} recommendation(s)`);
