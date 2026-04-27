@@ -1,0 +1,46 @@
+name: 'Weekly Defender Vulnerability Report'
+description: 'Sends weekly vulnerability reports from Microsoft Defender to device owners'
+author: 'Enonic'
+
+inputs:
+  tenant-id:
+    description: 'Azure AD Tenant ID'
+    required: true
+  client-id:
+    description: 'Azure AD Application (Client) ID'
+    required: true
+  client-secret:
+    description: 'Azure AD Client Secret'
+    required: true
+  device-name:
+    description: 'Specific device name to process (leave empty for all devices)'
+    required: false
+    default: ''
+  smtp-host:
+    description: 'SMTP server host'
+    required: true
+  smtp-port:
+    description: 'SMTP server port'
+    required: true
+    default: '587'
+  smtp-user:
+    description: 'SMTP username'
+    required: true
+  smtp-password:
+    description: 'SMTP password'
+    required: true
+  smtp-from:
+    description: 'Email sender address'
+    required: true
+  device-owners-file:
+    description: 'Path to device owners JSON file'
+    required: false
+    default: 'device-owners.json'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
