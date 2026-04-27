@@ -22,7 +22,7 @@
     "@actions/github": "^6.0.0",
     "@azure/identity": "^4.0.0",
     "@microsoft/microsoft-graph-client": "^3.0.7",
-    "axios": "^1.6.7",
+    "axios": "^1.15.0",
     "nodemailer": "^7.0.11"
   },
   "devDependencies": {
