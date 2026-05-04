@@ -18,5 +18,65 @@
     "deviceName": "asi-pc",
     "ownerName": "Anatol Sialitski",
     "ownerEmail": "asi@enonic.com"
+  },
+  {
+    "deviceName": "VBR-M1",
+    "ownerName": "Viachaslau Bradnitski",
+    "ownerEmail": "vbr@enonic.com"
+  },
+  {
+    "deviceName": "Mortens-MacBook-Pro",
+    "ownerName": "Morten Eriksen",
+    "ownerEmail": "mer@enonic.com"
+  },
+  {
+    "deviceName": "cunlaptop-2023",
+    "ownerName": "Vegard Ottervig",
+    "ownerEmail": "vot@enonic.com"
+  },
+  {
+    "deviceName": "bhj-mbp-m4-16",
+    "ownerName": "Bjørnar Hjelmevold",
+    "ownerEmail": "bhj@enonic.com"
+  },
+  {
+    "deviceName": "Aliaksandrs-ASL-MacBook-Pro",
+    "ownerName": "Aliaksandr Shklianko",
+    "ownerEmail": "asl@enonic.com"
+  },
+  {
+    "deviceName": "SRY-MacBook-Pro",
+    "ownerName": "SRY-MacBook-Pro",
+    "ownerEmail": "sry@enonic.com"
+  },
+  {
+    "deviceName": "PMI-MBP",
+    "ownerName": "Pavel Milkevich",
+    "ownerEmail": "pmi@enonic.com"
+  },
+  {
+    "deviceName": "Kristian-sin-MacBook-Air",
+    "ownerName": "Kristian Lanes",
+    "ownerEmail": "kla@enonic.com"
+  },
+  {
+    "deviceName": "Alans-MacBook-Pro",
+    "ownerName": "Alan Semenov",
+    "ownerEmail": "ase@enonic.com"
+  },
+  {
+    "deviceName": "mathiass-MacBook-Air",
+    "ownerName": "Mathias Skjulestad",
+    "ownerEmail": "msk@enonic.com"
+  },
+  {
+    "deviceName": "Mikitas-MacBook-Pro",
+    "ownerName": "Mikita Taukachou",
+    "ownerEmail": "mta@enonic.com"
+  },
+  {
+    "deviceName": "sig-win11",
+    "ownerName": "Siarhei Hauruseu",
+    "ownerEmail": "sig@enonic.com"
   }
 ]
