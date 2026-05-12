@@ -78,5 +78,10 @@
     "deviceName": "sig-win11",
     "ownerName": "Siarhei Hauruseu",
     "ownerEmail": "sig@enonic.com"
+  },
+  {
+    "deviceName": "Amanda-sin-MacBook-Air",
+    "ownerName": "Amanda Kloster",
+    "ownerEmail": "akl@enonic.com"
   }
 ]
