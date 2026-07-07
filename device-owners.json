@@ -83,5 +83,10 @@
     "deviceName": "Amanda-sin-MacBook-Air",
     "ownerName": "Amanda Kloster",
     "ownerEmail": "akl@enonic.com"
+  },
+  {
+    "deviceName": "MacBook-Pro-de-Bruno",
+    "ownerName": "Bruno Reis",
+    "ownerEmail": "bre@enonic.com"
   }
 ]
