@@ -1,4 +1,4 @@
-import nodemailer from 'nodemailer';
+import nodemailer, { type Mail } from 'nodemailer';
 import { DeviceReport } from './types';
 
 export interface EmailConfig {
@@ -10,7 +10,7 @@ export interface EmailConfig {
 }
 
 export class EmailSender {
-  private transporter: nodemailer.Transporter;
+  private transporter: Mail;
 
   constructor(private config: EmailConfig) {
     this.transporter = nodemailer.createTransport({
