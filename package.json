@@ -20,12 +20,11 @@
   "dependencies": {
     "@actions/core": "^2.0.3",
     "@actions/github": "^9.1.1",
-    "axios": "^1.16.0",
-    "nodemailer": "^9.0.1"
+    "axios": "^1.20.0",
+    "nodemailer": "^10.1.1"
   },
   "devDependencies": {
     "@types/node": "^20.11.17",
-    "@types/nodemailer": "^6.4.14",
     "@typescript-eslint/eslint-plugin": "^8.59.0",
     "@typescript-eslint/parser": "^8.59.0",
     "@vercel/ncc": "^0.38.1",
