@@ -129,7 +129,7 @@ To change the schedule:
 
 ### Renewing the Client Secret
 
-1. Azure portal → **Entra ID** → **App registrations** → the app with client ID `2751bf1a-e192-49c1-b4b5-c18806e973dc`
+1. Microsoft Entra admin center → **Entra ID** → **App registrations** → the app with client ID `2751bf1a-e192-49c1-b4b5-c18806e973dc`
 2. **Certificates & secrets** → **New client secret**, then copy its **Value**
 3. GitHub → **Settings** → **Secrets and variables** → **Actions** → update `DEFENDER_REPORT_CLIENT_SECRET`
 4. Run the workflow manually with a single `device-name` to verify
