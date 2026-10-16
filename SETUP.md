@@ -22,6 +22,8 @@ Configure these secrets in your GitHub repository:
 |-------------|-------|-------|
 | `DEFENDER_REPORT_CLIENT_SECRET` | `<your-client-secret>` | Azure AD application client secret |
 
+**The current client secret expires 2027-10-15** (created 2026-10-15 with a 12-month lifetime). Renew it before then; see [Renewing the Client Secret](#renewing-the-client-secret).
+
 ### SMTP Email Configuration
 
 | Secret Name | Example Value | Notes |
@@ -121,9 +123,19 @@ To change the schedule:
 **Problem:** "Authentication failed" or "401 Unauthorized"
 
 **Solutions:**
-1. Verify `DEFENDER_REPORT_CLIENT_SECRET` is correctly set
-2. Check that the Azure AD application permissions are consented
-3. Ensure the application is not expired
+1. Check whether the client secret has expired (the current one expires **2027-10-15**). Azure error `AADSTS7000222` in the log means it has; see [Renewing the Client Secret](#renewing-the-client-secret)
+2. Verify `DEFENDER_REPORT_CLIENT_SECRET` holds the secret's **Value**, not its Secret ID (Azure error `AADSTS7000215`)
+3. Check that the Azure AD application permissions are consented
+
+### Renewing the Client Secret
+
+1. Azure portal → **Entra ID** → **App registrations** → the app with client ID `2751bf1a-e192-49c1-b4b5-c18806e973dc`
+2. **Certificates & secrets** → **New client secret**, then copy its **Value**
+3. GitHub → **Settings** → **Secrets and variables** → **Actions** → update `DEFENDER_REPORT_CLIENT_SECRET`
+4. Run the workflow manually with a single `device-name` to verify
+5. Update the expiry date in this file and in `CLAUDE.md`
+
+History: the first secret expired in September 2026. Weekly runs failed with 401 from 2026-09-21 until the secret was renewed on 2026-10-15.
 
 ### Device Not Found
 
